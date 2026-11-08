@@ -1,0 +1,8 @@
+node_modules/
+.video-read/
+.video-read-test/
+.video-read-tmp/
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db

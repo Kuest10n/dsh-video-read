@@ -1,0 +1,19 @@
+# Host-level bundle: registers the video-reading tools for every agent in this profile.
+#
+# Install from this repository:
+#   plugin_manager(action="install_bundle", target="https://github.com/Kuest10n/dsh-video-read")
+# or from a local checkout:
+#   plugin_manager(action="install_bundle", target="E:\\path\\to\\dsh-video-read")
+#
+# Machine-specific values (Bilibili cookie file, custom ffmpeg path, caption model)
+# are intentionally left empty here; set them in the Web settings panel
+# (Settings -> Video Reader) or in ~/.dsh/cache/dsh-video-read/settings.json.
+- insert:
+    - id: dsh-video-read
+      name: 'dsh-video-read'
+      config:
+        autoDownloadFfmpeg: true
+        autoDownloadYtdlp: true
+        cookieFile: ''
+        maxFrames: 32
+        keepSource: true

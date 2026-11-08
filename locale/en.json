@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Video Reader",
+    "description": "Give an agent a video link or local file. It acquires the media, samples frames at a chosen fps, reads timeline subtitles, and answers with visual evidence."
+  }
+}
