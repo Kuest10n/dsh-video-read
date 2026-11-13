@@ -147,7 +147,7 @@ const fakeWebCtx = {
       : undefined,
 }
 const mounted = mountPanel({ ctx: fakeWebCtx, cfg: {}, version: 'test' })
-check('panel mounts both routes', mounted && mounted.paths.length === 2 && registeredRoutes.length === 2, JSON.stringify(registeredRoutes))
+check('panel mounts all routes', mounted && mounted.paths.length === 3 && registeredRoutes.length === 3, JSON.stringify(registeredRoutes))
 mounted.dispose()
 check('panel mount is a no-op without a web carrier', mountPanel({ ctx: { get: () => undefined }, cfg: {} }) === null)
 

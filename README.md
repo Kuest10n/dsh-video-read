@@ -2,7 +2,17 @@
 
 让 DSH Agent 具备「阅读视频」能力的 Host 级插件：给一个 B 站链接或本地视频文件，插件自动取流、抽帧、对齐字幕时间轴，把画面帧作为图片证据交给模型；对纯文本模型提供文本证据链（分段摘要 + 时间轴检索），并可选地把帧交给视觉模型写 caption。
 
-> **版本 0.4.1（安全审计 / 插件兼容 / 细节加固）**：0.4.0 的「按模型模态自动选读法 / 触发式工具描述 / 联系表烧录时间戳 / 首尾黑边自动裁剪」保持不变，本版为审计加固，见文末「0.4.1 增量」小节。**0.4.0 摘要**：新增「按模型模态自动选择读法」——`video_probe` 的 `recommended.modelFit` 明确告诉 Agent 当前路由是 `image+text` 还是 `text-only`，文本模型自动走 digest/ask + caption 桥；工具描述改成**触发式**（用户给 B 站/YouTube/直链 mp4 或问视频内容时优先调用），并在 README 记录如何让 Agent 主动使用；`mode="grid"` 的联系表现在把**时间戳烧进每一格**（drawtext，行优先），按帧的顺序不再需要靠文字索引猜；新增**首尾黑边自动裁剪**（ffmpeg `blackdetect` 只分析首尾各 3s，默认 `skipBlackEdges="auto"`，可用 `trim_head`/`trim_tail`/`skip_black_edges="never"` 覆盖）。0.3.3 的安全加固、0.3.2 的直链通道、0.3.1 的 yt-dlp 自动安装、0.3.0 的面板均保持不变。
+## 3 分钟快速开始
+
+1. 安装插件并重启 Host（安装命令见下方「安装」）。首次使用会自动准备 ffmpeg；YouTube 等网页来源另需 yt-dlp，均不需手动配置。
+2. 直接把链接或本地路径发给 Agent，例如：**“总结这个视频：https://www.bilibili.com/video/BV1kvxF6zEDu”**。不需要手动填写工具 JSON。
+3. 长视频先说 **“先给时间轴提纲，再找出关键画面”**；追问某个细节时说 **“找某句话出现的时刻，并看当时的画面”**。Agent 会先读文本证据，再局部补帧，而不是把整段视频都变成图片。
+4. 本地文件可直接说：**“阅读 D:\\clips\\demo.mp4，列出主要镜头”**。可选字幕放在同目录并命名为 `demo.zh.srt`、`demo.srt`、`demo.vtt` 或 `demo.ass`；没有字幕也能抽帧，只是没有台词时间轴。
+5. 设置页位于 **设置 → Video Reader**：三步指南、真实下载/抽帧进度、参数说明、缓存占用和“预览后清理”都在这里。
+
+**能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
+
+> **版本 0.5.0（同类产品调研 / 面板重设计 / 缓存安全）**：新版设置页使用 DSH 真实主题 token，提供上手指南、阶段进度、配置说明与断线状态；工作区视频缓存与全局运行时缓存分开统计，清理先预览再确认。修复 B 站清晰度与 JPEG 质量共用一个配置键的问题（新增 `bilibiliQuality`），`video_cache` 默认只预览不删除；文本摘要显示每段实际展示/总证据数。历史安全与功能记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -44,17 +54,17 @@ video_read(source="https://cdn.example.com/clip.mp4?token=...", fps=0.2, max_fra
 
 插件带一个 Host 级设置页（`设置 → Video Reader`，无需任何前端构建步骤）：
 
-- **最近一次读取**：实时显示 `video_digest`/`video_read`/`video_frames` 等捕获管线的阶段（下载 → 探测 → 抽帧 → 描述 → 完成）、已下载字节/总字节百分比、帧数、源与产物目录；每 2.5 秒轮询一次。
-- **配置**：白名单内的 22 个常用项可直接编辑并保存（数值有范围校验，非法值返回 400 且不落盘）；保存写入 `~/.dsh/cache/dsh-video-read/settings.json`，在下一次插件激活时覆盖 bundle patch 的同名项。
-- **缓存**：按目录列出工作区 `.video-read` 的产物大小。
+- **最近一次读取**：显示 `video_read`/`video_frames` 等捕获管线的真实阶段（下载 → 探测 → 抽帧 → 描述 → 完成）、字节进度、帧数、源与错误详情；每 4 秒轮询，后台标签页暂停。
+- **配置**：常用项附用途、默认值、取值范围和成本说明；保存立即对新工具调用生效，并写入 `~/.dsh/cache/dsh-video-read/settings.json`。Cookie/yt-dlp 路径等敏感字段不在网页表单暴露。
+- **缓存**：分别显示工作区 `.video-read` 视频产物与全局 ffmpeg/yt-dlp 运行时；只清理超过保留期的工作区目录，先 dry-run 列出数量与字节，再显式确认。
 - 宿主路由：`GET /api/dsh-video-read/panel`（状态 JSON）、`POST /api/dsh-video-read/config`（`{"config":{...}}`，成功返回已保存项与持久化路径）。这两个路由由 `lib/panel.js` 在 Host Web carrier 上注册；纯 Electron 组合没有 Web carrier 时自动跳过。
 - 客户端半是 `lib/client.js`（预构建模块装载器 bundle，注册 `settings.section`）；宿主半是 `lib/panel.js` + `lib/progress.js`。
 - **生效条件**：client 模块图在 Host 启动时组合，本版本首次加入 `dsh.client` 声明，因此需要**重启一次 Host 并刷新页面**后设置页才会出现；之后修改 `lib/client.js` 只需重启 Host 或走客户端 HMR。
 
 ### 文本证据链（C2，纯文本模型可用）
 
-- `video_digest`：把字幕按 `segment_seconds` 分段（自动放宽以不超过 `max_segments`），每段保留最多 40 条台词 + 8 条弹幕；返回 `digestText` 可直接阅读，适合 1–3 小时长视频先建立全局理解。
-- `video_ask`：本地 BM25 风格的简单排序（词粒度 + 字幕权重 1.0 / 弹幕权重 0.7），不调用任何模型、不下载媒体；返回时间戳 + 文本 + 命中词，便于后续 `video_frames mode="times"` 定点看画面。
+- `video_digest`：把字幕按 `segment_seconds` 分段（自动放宽以不超过 `max_segments`），每段保留最多 40 条台词 + 8 条弹幕；返回 `digestText` 可直接阅读，适合 1–3 小时长视频先建立全局理解。每段标明 `已展示/总数`，不会把截薄后的文本说成完整字幕。
+- `video_ask`：本地关键词匹配与轻量排序（拉丁词/中文二元组 + 字幕权重 1.0 / 弹幕权重 0.7），不调用任何模型、不下载媒体；返回时间戳 + 文本 + 命中词，便于后续 `video_frames mode="times"` 定点看画面。
 - 两者都要求视频有字幕；B 站 AI 字幕未生成时返回 0 条并在 `subtitle.note` 说明。
 
 ### 弹幕（B 站）
@@ -67,7 +77,7 @@ B 站为每个视频提供一张 10×10 的关键帧瓦片图（含每个瓦片�
 
 ### C1 视觉桥（caption）
 
-给纯文本模型补充「别人替它看」的能力：`video_read` / `video_frames` 传 `captions="always"`（或 `auto` 且当前路由支持图片）时，对已附加为图片的帧逐帧调用一次视觉模型（`ctx.llm.stream`，`purpose: "compaction"`），把每帧画面写成 1–2 句 caption，随帧返回。
+给纯文本模型补充「别人替它看」的能力：`video_read` / `video_frames` 传 `captions="always"`，或 `auto` 且当前路由**不支持图片**且已配置可用 caption 模型时，对附加帧逐帧调用视觉模型（`ctx.llm.stream`，`purpose: "compaction"`），把每帧画面写成 1–2 句 caption，随帧返回。
 
 - 默认 caption 用当前路由模型；可用 `captionProvider` / `captionModel` 指定更便宜的视觉模型。
 - 只对前 `maxCaptionFrames`（默认 8）帧生成，每帧最多 `captionMaxTokens`（默认 400）token；失败逐帧记录在 `notes`，不影响帧证据。
@@ -116,12 +126,13 @@ plugin_manager(action="install_bundle", target="E:\\path\\to\\dsh-video-read")
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
-| `autoDownloadFfmpeg` | `true` | 首次使用时自动下载静态 ffmpeg 构建到 `~/.dsh/cache/dsh-video-read`，失败时回退到 PATH |
+| `autoDownloadFfmpeg` | `true` | 首次使用自动下载并校验 ffmpeg；查找顺序为显式路径 → 插件缓存 → PATH → 自动下载 |
 | `autoDownloadYtdlp` | `true` | 首次遇到 YouTube / 通用 Web 链接时从 npm 镜像安装 `yt-dlp-static`（sha512 校验 + 单文件解压 + `--version` 验证） |
 | `ffmpegPath` | `""` | 指定已有的 `ffmpeg.exe`；设置后不再下载 |
 | `cacheDir` | `""` | ffmpeg 缓存目录，默认 `~/.dsh/cache/dsh-video-read` |
-| `cookieFile` | `""`（面板设置） | B 站 cookie JSON 文件（`{"cookie": "SESSDATA=...; ..."}`），只读；用于 1080P 与 AI 字幕 |
-| `quality` | `64` | B 站 qn：64=720P（默认，省流量）、80=1080P |
+| `cookieFile` | `""` | B 站 cookie JSON 文件（`{"cookie": "SESSDATA=...; ..."}`），只读；用于高画质与 AI 字幕。通过 bundle/settings.json 配置，不开放网页写入 |
+| `quality` | `3` | JPEG qscale（2–31 常用，越小越清晰，不是百分制） |
+| `bilibiliQuality` | `64` | B 站 qn：16=360P、32=480P、64=720P（默认）、80=1080P；高画质受账号权限限制 |
 | `maxFrames` | `32` | 单次抽帧硬上限 |
 | `imageWidth` | `1280` | 抽帧最长边 |
 | `sceneThreshold` | `0.3` | `mode="scene"` 的转场阈值 |

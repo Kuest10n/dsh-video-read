@@ -43,6 +43,8 @@ const DEFAULT_CONFIG = {
   cacheDir: '',
   cookieFile: '',
   quality: 3,
+  // Bilibili qn (16=360p, 32=480p, 64=720p); separate from JPEG qscale above.
+  bilibiliQuality: 64,
   maxFrames: 16,
   imageWidth: 1280,
   sceneThreshold: 0.3,
@@ -848,7 +850,7 @@ function framesTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         fps: {
           type: 'number',
           description: 'Frames per second for even sampling (default 1). Values above 32/max_frames saturate at max_frames; 0.05-60 accepted.',
@@ -937,7 +939,7 @@ function readTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         fps: { type: 'number', description: 'Even-sampling fps (default 1; 0.05-60 accepted, saturating at max_frames).' },
         max_frames: { type: 'integer', minimum: 1, maximum: 32, description: 'Frame cap (default 8 for video_read, hard max 32).' },
         start: { type: 'number', description: 'Optional range start in seconds (default 0).' },
@@ -1004,7 +1006,7 @@ function digestTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         start: { type: 'number', description: 'Optional start second (default 0).' },
         end: { type: 'number', description: 'Optional end second (default video duration).' },
         segment_seconds: { type: 'number', description: 'Target segment length in seconds (default 120; adapted so max_segments is respected).' },
@@ -1041,9 +1043,11 @@ function digestTool(ctx, cfg) {
         maxSegments: Number(args?.max_segments) || cfg.maxDigestSegments,
       })
       const value = baseValue(meta, {
-        notes: [...notes, ...(danmaku.note ? [danmaku.note] : [])],
+        notes: [...notes, ...(danmaku.note ? [danmaku.note] : []), ...(meta.subtitles?.note ? [meta.subtitles.note] : [])],
         value: {
           range: { start, end },
+          evidenceStatus: built.totalCues || built.totalDanmaku ? 'ready' : 'no-text-evidence',
+          nextAction: built.totalCues ? null : 'Use video_frames or video_shots to inspect the visuals; text-only summary cannot infer visual-only content.',
           segments: built.segments,
           segmentSeconds: built.segmentSeconds,
           totalCues: built.totalCues,
@@ -1057,6 +1061,8 @@ function digestTool(ctx, cfg) {
         segmentSeconds: built.segmentSeconds,
         totalCues: built.totalCues,
         totalDanmaku: built.totalDanmaku,
+        coveredUntilSec: built.coveredUntilSec,
+        evidenceNote: value.nextAction,
         notes: value.notes,
       })
       return value
@@ -1072,7 +1078,7 @@ function askTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         question: { type: 'string', description: 'Natural-language question or keywords to retrieve moments for.' },
         limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Maximum matching lines (default 12).' },
         start: { type: 'number', description: 'Optional start second filter.' },
@@ -1143,7 +1149,7 @@ function scenesTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         max_frames: { type: 'integer', minimum: 1, maximum: 32, description: 'Maximum cuts to return (default 16).' },
         start: { type: 'number', description: 'Optional start second.' },
         end: { type: 'number', description: 'Optional end second.' },
@@ -1267,7 +1273,7 @@ function storyboardTool(ctx, cfg) {
     parameters: {
       type: 'object',
       properties: {
-        source: { type: 'string', description: 'Bilibili URL or local video file path.' },
+        source: { type: 'string', description: 'Bilibili or YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path.' },
         start: { type: 'number', description: 'Optional range start in seconds (default 0).' },
         end: { type: 'number', description: 'Optional range end in seconds (default video duration).' },
         max_frames: { type: 'integer', minimum: 1, maximum: 32, description: 'Scene cap (default 12, hard max 32).' },
@@ -1330,7 +1336,7 @@ function cacheTool(ctx, cfg) {
       properties: {
         action: { type: 'string', enum: ['status', 'prune'], description: 'status (default) lists the cache; prune removes stale entries.' },
         ttl_days: { type: 'number', minimum: 0, description: 'Override the staleness window in days (default from config).' },
-        dry_run: { type: 'boolean', description: 'For prune: report what would be removed without deleting.' },
+        dry_run: { type: 'boolean', description: 'For prune: preview without deleting (default true). Must be explicitly false to delete.' },
       },
       additionalProperties: false,
     },
@@ -1342,8 +1348,9 @@ function cacheTool(ctx, cfg) {
       const ttlDays = args?.ttl_days === undefined ? Number(cfg.cacheTtlDays) || 14 : Number(args.ttl_days)
       if (!Number.isFinite(ttlDays) || ttlDays < 0) throw new Error('ttl_days must be a non-negative number')
       if (action === 'prune') {
-        const pruned = await pruneCache(rootDir, { ttlDays, dryRun: args?.dry_run === true })
-        return { ok: true, action, ...pruned }
+        const dryRun = args?.dry_run !== false
+        const pruned = await pruneCache(rootDir, { ttlDays, dryRun })
+        return { ok: true, action, dryRun, ...pruned }
       }
       const status = await cacheStatus(rootDir, { ttlDays })
       return { ok: true, action, ...status }
@@ -1364,7 +1371,7 @@ export function apply(ctx, config = {}) {
   // them, and the tools keep working.
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.4.1' })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.0' })
     } catch {}
   }
   try {
