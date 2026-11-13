@@ -12,7 +12,7 @@
 
 **能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
 
-> **版本 0.5.0（同类产品调研 / 面板重设计 / 缓存安全）**：新版设置页使用 DSH 真实主题 token，提供上手指南、阶段进度、配置说明与断线状态；工作区视频缓存与全局运行时缓存分开统计，清理先预览再确认。修复 B 站清晰度与 JPEG 质量共用一个配置键的问题（新增 `bilibiliQuality`），`video_cache` 默认只预览不删除；文本摘要显示每段实际展示/总证据数。历史安全与功能记录见文末。
+> **版本 0.5.1（三维度完善：可访问性 / 错误韧性 / 性能与反馈）**：面板按官方设置页规范重排（分组 fieldset、原生进度条不伪装百分比、字段级校验与首错聚焦、危险操作预览+确认+焦点返还、reduced-motion 支持、后台自动降频轮询）；全部失败路径挂结构化错误码（面板直接显示"码+人话"对照，见下方排查表）；进度上报覆盖 probe/digest/ask/shots 全部工具；yt-dlp 调用统一 `--ignore-config` 防全局配置破坏 CLI 契约；无字幕时返回显式原因（no-subs / needs-cookie / fetch-failed）与"画面正常，只是没有词"提示。0.5.0 的面板重设计/缓存安全记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -54,9 +54,10 @@ video_read(source="https://cdn.example.com/clip.mp4?token=...", fps=0.2, max_fra
 
 插件带一个 Host 级设置页（`设置 → Video Reader`，无需任何前端构建步骤）：
 
-- **最近一次读取**：显示 `video_read`/`video_frames` 等捕获管线的真实阶段（下载 → 探测 → 抽帧 → 描述 → 完成）、字节进度、帧数、源与错误详情；每 4 秒轮询，后台标签页暂停。
-- **配置**：常用项附用途、默认值、取值范围和成本说明；保存立即对新工具调用生效，并写入 `~/.dsh/cache/dsh-video-read/settings.json`。Cookie/yt-dlp 路径等敏感字段不在网页表单暴露。
-- **缓存**：分别显示工作区 `.video-read` 视频产物与全局 ffmpeg/yt-dlp 运行时；只清理超过保留期的工作区目录，先 dry-run 列出数量与字节，再显式确认。
+- **最近一次读取**：显示 `video_probe`/`video_digest`/`video_ask`/`video_shots`/`video_read`/`video_frames` 等全部工具的真实阶段（解析 → 下载 → 探测 → 抽帧 → 描述 → 弹幕 → 完成）、字节进度、帧数、视频标题、源与错误详情；空闲 15 秒 / 运行 2 秒自适应轮询，后台标签页暂停，断线保留旧数据并标注。
+- **配置**：按「阅读预算 / 下载与辅助模型 / 产物与缓存」三组分区，字段级校验（非法值即时标红、保存聚焦第一个错误项），修改后新工具调用立即生效，并写入 `~/.dsh/cache/dsh-video-read/settings.json`。Cookie/yt-dlp 路径等敏感字段不在网页表单暴露。
+- **错误码**：所有失败路径返回结构化错误码（`E_FFMPEG_MISSING`、`E_RISK_CONTROL` 等），面板显示"码+人话"对照，完整对照见下方排查表。
+- **缓存**：分别显示工作区 `.video-read` 视频产物与全局 ffmpeg/yt-dlp 运行时；只清理超过保留期的工作区目录，先 dry-run 列出数量与字节，再显式确认，确认对话框关闭后焦点返回触发按钮。
 - 宿主路由：`GET /api/dsh-video-read/panel`（状态 JSON）、`POST /api/dsh-video-read/config`（`{"config":{...}}`，成功返回已保存项与持久化路径）。这两个路由由 `lib/panel.js` 在 Host Web carrier 上注册；纯 Electron 组合没有 Web carrier 时自动跳过。
 - 客户端半是 `lib/client.js`（预构建模块装载器 bundle，注册 `settings.section`）；宿主半是 `lib/panel.js` + `lib/progress.js`。
 - **生效条件**：client 模块图在 Host 启动时组合，本版本首次加入 `dsh.client` 声明，因此需要**重启一次 Host 并刷新页面**后设置页才会出现；之后修改 `lib/client.js` 只需重启 Host 或走客户端 HMR。
@@ -154,6 +155,28 @@ plugin_manager(action="install_bundle", target="E:\\path\\to\\dsh-video-read")
 | `captionMaxTokens` | `400` | 每帧 caption 的输出 token 上限（含推理模型的思考 token） |
 | `ytdlpPath` | `""` | 指定 `yt-dlp.exe`；留空依次查 PATH / `%LOCALAPPDATA%\\Programs\\yt-dlp` / `~/.dsh/cache/dsh-video-read/bin`，都没有且 `autoDownloadYtdlp` 未关时自动安装 |
 
+## 排查表（错误码对照）
+
+所有失败路径都会在工具输出与面板中给出结构化错误码。对照表：
+
+| 错误码 | 常见原因 | 怎么检查 | 下一步 |
+| --- | --- | --- | --- |
+| `E_FFMPEG_MISSING` | ffmpeg 不可用且自动下载被禁用 | 面板/README「配置」确认 `autoDownloadFfmpeg`；`ffmpeg -version` 是否在 PATH | 开启自动下载，或 `ffmpegPath` 指向已有 ffmpeg |
+| `E_YTDLP_MISSING` | yt-dlp 不可用且自动安装被禁用/失败 | 确认 `autoDownloadYtdlp`；`yt-dlp --version` 是否可用 | 开启自动安装，或 `ytdlpPath` 指向已有 yt-dlp |
+| `E_RISK_CONTROL` | B 站风控（412），常见于无 cookie 的数据中心 IP | 换浏览器网络验证 URL 是否可看 | 从**打开过 B 站的浏览器**导出 cookie（无需登录），配 `cookieFile` 后重试 |
+| `E_NEEDS_COOKIE` | 接口要求登录（-101），AI 字幕/高画质需要 | `video_probe` 看 subtitle.note | 配置 `cookieFile`（含 SESSDATA） |
+| `E_VIP_CONTENT` | 视频为付费/大会员内容，无流可取 | 确认浏览器里能否播放 | 降低 `bilibiliQuality`；或本地文件 |
+| `E_PRIVATE_URL` | 链接指向内网/私网地址（SSRF 防护） | URL 是否为公网 | 改用公网直链或页面 URL |
+| `E_DRM` | Netflix/爱奇艺 VIP 等 DRM 平台 | — | 插件不绕过 DRM；用自有本地文件 |
+| `E_TOO_LONG` | 视频超过 `maxVideoMinutes`（默认 180 分钟） | `video_probe` 看时长 | 分段本地文件；或调高 `maxVideoMinutes` |
+| `E_SEGMENTED` | B 站返回多段 FLV（老视频） | `video_probe` 看 notes | 稍后重试（通常会有 DASH）；或用其他工具下载后传本地文件 |
+| `E_PLAYLIST` | URL 是合集/列表而非单个视频 | — | 传单个视频 URL |
+| `E_NO_SPRITE` | 该视频没有 B 站 videoshot 精灵图 | `video_probe` 确认是 B 站 | 改用 `video_frames` |
+| `E_FILE_NOT_FOUND` | 本地文件路径不存在 | 核对路径与工作区 | 用绝对路径或相对工作区的路径 |
+| `E_DOWNLOAD` | 下载失败/卡死/超时 | 面板进度显示字节数 | 重试；网络不稳时调低画质 |
+
+无字幕时的原因枚举（`subtitle.note` / `notes`）：`no-subs`（视频确实没有字幕——画面正常，只是没有词，请改用抽帧）、`needs-cookie`（未登录拿不到 AI 字幕，配 `cookieFile`）、`fetch-failed`（网络/接口临时失败，可重试）。
+
 ## 限制与已知问题
 
 - **B 站 4K / 高码率**：只保证 720P / 1080P（登录 cookie）；更高档位有已知限制。
@@ -183,7 +206,8 @@ plugin_manager(action="remove_bundle", target="dsh-video-read")
 node scripts/self-test.mjs             # 合成视频 + 三种模式 + 纯文本降级（31 项）
 node scripts/self-test.mjs --bilibili  # 追加真实 B 站探明、取流与抽帧（37 项）
 node scripts/m15-test.mjs              # 纯函数快速冒烟：danmaku / digest / ask / shots / yt-dlp JSON / storyboard / grid / cache / panel / URL guard（60 项）
-node scripts/client-test.mjs           # 客户端 bundle 契约：模块装载器注册、settings.section 注册、apply 容错（15 项）
+node scripts/client-test.mjs           # 客户端 bundle 契约：模块装载器注册、settings.section 注册、apply 容错（22 项）
+node scripts/panel-test.mjs            # Host 路由与安全契约：配置校验 / 同源 / 缓存确认 / 快照字段（20 项）
 ```
 
 `scripts/self-test.mjs` 不依赖 Host；`m15-test.mjs` 不联网、不依赖 ffmpeg；`client-test.mjs` 用假的 `window.__ModuleLoader__` 与 `require` 离线执行 `lib/client.js`。
@@ -378,6 +402,18 @@ node scripts/client-test.mjs           # 客户端 bundle 契约：模块装载�
 ## 仓库与许可
 
 - 源码仓库：<https://github.com/Kuest10n/dsh-video-read>
+
+### 2026-11-14 0.5.1 增量（可访问性 / 错误韧性 / 性能与反馈）
+
+**1）错误码体系（错误韧性）**：全部用户可见失败路径挂结构化 `error.code`（`E_FFMPEG_MISSING` / `E_YTDLP_MISSING` / `E_RISK_CONTROL` / `E_NEEDS_COOKIE` / `E_VIP_CONTENT` / `E_PRIVATE_URL` / `E_DRM` / `E_TOO_LONG` / `E_SEGMENTED` / `E_PLAYLIST` / `E_NO_SPRITE` / `E_FILE_NOT_FOUND` / `E_DOWNLOAD` / `E_BILIBILI_API`）；`finishRun` 把 `errorCode` 写进进度文件，面板把「码 + 中文提示」一起显示；README 新增排查表（见上文）。无字幕返回显式原因枚举 `no-subs / needs-cookie / fetch-failed`，note 写明「画面正常，只是没有词」（借鉴 dsh-video-storyboard #77 的用户误解教训）。
+
+**2）面板（设计美学 + 可访问性）**：配置拆三组 fieldset（阅读预算 / 下载与辅助模型 / 产物与缓存），布尔项整行可点、触控目标 24px；字段级校验（非法值即时标红 + `aria-invalid` + `role=alert` 错误节点），保存失败聚焦第一个错误项，无修改/校验失败/保存中禁用保存，新增「放弃未保存修改」；进度条改为原生语义（有字节进度显示确定百分比 + `aria-valuetext="45% · 下载视频"`，无进度显示不定态样式，不再伪装固定 28%），`prefers-reduced-motion` 下关闭过渡；危险清理保持「预览 → 明确文案确认」，确认/取消后焦点返回触发按钮；轮询改自适应（运行 2s / 空闲 15s），后台标签页暂停不变。
+
+**3）进度全覆盖（性能与反馈）**：`video_probe` / `video_digest` / `video_ask` / `video_shots` 全部接入 startRun/updateRun/finishRun，阶段补齐 `resolving / probing / captions / danmaku`；运行记录带视频 `title`，面板显示标题而不是裸 URL。
+
+**4）正确性与兼容修复**：yt-dlp 全部调用加 `--ignore-config`，防止用户全局 `yt-dlp.conf`（如 `--embed-subs`）破坏固定 CLI 契约（dsh-video-storyboard #91 同款问题）；`video_shots` 裁切质量改走 `cfg.quality`；`video_probe`/`video_digest` 等工具 `source` 描述补全 YouTube/直链支持；`video_frames` 的 `times`（超 32 抽稀而非拒绝）与 `captions`（auto 仅在"无图模态且已配 captionModel"时生效）描述与实际行为对齐；`video_scenes` 描述写明无切点时的中点回退；`lib/progress.js` settings 读取加 5s memo、`describeWorkspaceCache` 加 5s memo 且清理后主动失效，面板轮询不再每秒打盘。
+
+**5）验证**：`node --check` 全过；`m15-test.mjs` 60/60、`client-test.mjs` 22/22、`panel-test.mjs` 20/20、`self-test.mjs` 36/36；真机回归见下。
 - 提交市场索引：`dsh-community-plugins` 的 `community.json`（id `dsh-video-read`，repo 指向上面的仓库）
 - 许可证：Apache License 2.0，见 [LICENSE](LICENSE)
 - 问题反馈：<https://github.com/Kuest10n/dsh-video-read/issues>

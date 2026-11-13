@@ -426,10 +426,12 @@ async function captureInner(options) {
   })
   const ff = meta.ffmpeg ?? (await resolveFfmpeg(cfg, { signal: exec?.signal }))
   if (!ff?.available) {
-    throw new Error(
+    const error = new Error(
       `ffmpeg is unavailable, so frame extraction cannot run. ${ff?.note ?? ''} ` +
         'Set the plugin option ffmpegPath, install ffmpeg on PATH, or allow autoDownloadFfmpeg.',
     )
+    error.code = 'E_FFMPEG_MISSING'
+    throw error
   }
   if (!meta.filePath) throw new Error('media acquisition did not produce a local file')
   if (!meta.durationSec || !Number.isFinite(meta.durationSec)) {
@@ -602,6 +604,7 @@ async function captureInner(options) {
     ? await attachFrames(ctx, frames, { maxImages: attachBudget, concurrency: frameConcurrency(cfg) })
     : frames.map((frame) => ({ ...frame, attachment: null }))
   if (captionsRequested) {
+    updateRun(options.progress, 'captions', { frames: withAttachments.length })
     const captioned = await captionFrames({
       ctx,
       cfg,
@@ -661,6 +664,7 @@ async function captureInner(options) {
   let danmaku = null
   if (options.includeDanmaku && meta.kind === 'bilibili' && meta.cid) {
     try {
+      updateRun(options.progress, 'danmaku')
       const fetched = await fetchDanmaku({ cid: meta.cid, signal: exec?.signal })
       const lines = fetched.lines.slice(0, 200).map((line) => `${formatClock(line.time)} ${line.text}`)
       danmaku = { count: fetched.count, lines, note: fetched.note }
@@ -817,7 +821,7 @@ function probeTool(ctx, cfg) {
         source: {
           type: 'string',
           description:
-            'Bilibili video URL (bilibili.com/video/BV..., av..., b23.tv short link) or a local video file path (absolute, or relative to the workspace).',
+            'Bilibili video URL (bilibili.com/video/BV..., av..., b23.tv short link), a YouTube page URL, a direct video media URL (.mp4/.webm/...), or a local video file path (absolute, or relative to the workspace).',
         },
       },
       required: ['source'],
@@ -828,16 +832,30 @@ function probeTool(ctx, cfg) {
     async execute(args, exec) {
       const source = String(args?.source ?? '').trim()
       if (!source) throw new Error('source is required')
-      const meta = await resolveSource({
-        ctx,
-        cfg,
-        cwd: sessionCwd(ctx, exec),
-        signal: exec?.signal,
-        download: false,
-        source,
-      })
-      const route = await imageRoute(ctx, exec)
-      return probeValue(meta, route, cfg)
+      const progress = startRun({ cfg, source, mode: 'probe', maxFrames: null })
+      try {
+        updateRun(progress, 'resolving')
+        const meta = await resolveSource({
+          ctx,
+          cfg,
+          cwd: sessionCwd(ctx, exec),
+          signal: exec?.signal,
+          download: false,
+          source,
+        })
+        updateRun(progress, 'probing', {
+          detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
+          artifactsDir: meta.artifactsDir ?? null,
+          title: meta.title ?? null,
+        })
+        const route = await imageRoute(ctx, exec)
+        const value = probeValue(meta, route, cfg)
+        finishRun(progress, { ok: true, artifactsDir: meta.artifactsDir ?? null })
+        return value
+      } catch (error) {
+        finishRun(progress, { ok: false, error })
+        throw error
+      }
     },
   }
 }
@@ -866,7 +884,8 @@ function framesTool(ctx, cfg) {
           type: 'array',
           items: { type: 'number', minimum: 0 },
           maxItems: MAX_TIMES,
-          description: 'Explicit timestamps in seconds; only with mode="times". Max 32 after thinning (larger lists are rejected).',
+          description:
+            'Explicit timestamps in seconds; only with mode="times". Lists longer than 32 are thinned (evenly kept) to the frame cap with a note, not rejected.',
         },
         start: { type: 'number', description: 'Optional start of the sampled range in seconds (default 0).' },
         end: { type: 'number', description: 'Optional end of the sampled range in seconds (default video duration).' },
@@ -876,7 +895,7 @@ function framesTool(ctx, cfg) {
           type: 'string',
           enum: ['auto', 'always', 'never'],
           description:
-            'Caption frames with an image-capable model: auto (default) when the routed model sees images or captionModel is configured, always, or never.',
+            'Caption frames with an image-capable model for text-only readers: auto (default) only when the routed model cannot see images AND captionModel is configured; always = caption regardless; never = skip.',
         },
         skip_black_edges: {
           type: 'string',
@@ -1021,38 +1040,47 @@ function digestTool(ctx, cfg) {
     async execute(args, exec) {
       const source = String(args?.source ?? '').trim()
       if (!source) throw new Error('source is required')
-      const meta = await metaOnly(ctx, cfg, exec, source)
-      const cues = Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []
-      const notes = [...(meta.notes ?? [])]
-      let danmaku = { count: 0, total: 0, lines: [], note: null }
-      if (args?.include_danmaku !== false && meta.kind === 'bilibili' && meta.cid) {
-        try {
-          danmaku = await fetchDanmaku({ cid: meta.cid, signal: exec?.signal })
-        } catch (error) {
-          notes.push(`danmaku unavailable: ${error.message}`)
+      const progress = startRun({ cfg, source, mode: 'digest', maxFrames: null })
+      try {
+        updateRun(progress, 'resolving')
+        const meta = await metaOnly(ctx, cfg, exec, source)
+        updateRun(progress, 'probing', {
+          detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
+          artifactsDir: meta.artifactsDir ?? null,
+          title: meta.title ?? null,
+        })
+        const cues = Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []
+        const notes = [...(meta.notes ?? [])]
+        let danmaku = { count: 0, total: 0, lines: [], note: null }
+        if (args?.include_danmaku !== false && meta.kind === 'bilibili' && meta.cid) {
+          try {
+            updateRun(progress, 'danmaku')
+            danmaku = await fetchDanmaku({ cid: meta.cid, signal: exec?.signal })
+          } catch (error) {
+            notes.push(`danmaku unavailable: ${error.message}`)
+          }
         }
-      }
-      const start = Math.max(0, Number(args?.start ?? 0) || 0)
-      const end = args?.end === undefined ? Number(meta.durationSec) : Math.max(start + 0.5, Number(args.end) || 0)
-      const built = buildSegments({
-        cues,
-        danmaku: danmaku.lines,
-        startSec: start,
-        endSec: end,
-        segmentSeconds: Number(args?.segment_seconds) || cfg.digestSegmentSeconds,
-        maxSegments: Number(args?.max_segments) || cfg.maxDigestSegments,
-      })
-      const value = baseValue(meta, {
-        notes: [...notes, ...(danmaku.note ? [danmaku.note] : []), ...(meta.subtitles?.note ? [meta.subtitles.note] : [])],
-        value: {
-          range: { start, end },
-          evidenceStatus: built.totalCues || built.totalDanmaku ? 'ready' : 'no-text-evidence',
-          nextAction: built.totalCues ? null : 'Use video_frames or video_shots to inspect the visuals; text-only summary cannot infer visual-only content.',
-          segments: built.segments,
-          segmentSeconds: built.segmentSeconds,
-          totalCues: built.totalCues,
-          totalDanmaku: built.totalDanmaku,
-          danmaku: { count: danmaku.count, note: danmaku.note },
+        const start = Math.max(0, Number(args?.start ?? 0) || 0)
+        const end = args?.end === undefined ? Number(meta.durationSec) : Math.max(start + 0.5, Number(args.end) || 0)
+        const built = buildSegments({
+          cues,
+          danmaku: danmaku.lines,
+          startSec: start,
+          endSec: end,
+          segmentSeconds: Number(args?.segment_seconds) || cfg.digestSegmentSeconds,
+          maxSegments: Number(args?.max_segments) || cfg.maxDigestSegments,
+        })
+        const value = baseValue(meta, {
+          notes: [...notes, ...(danmaku.note ? [danmaku.note] : []), ...(meta.subtitles?.note ? [meta.subtitles.note] : [])],
+          value: {
+            range: { start, end },
+            evidenceStatus: built.totalCues || built.totalDanmaku ? 'ready' : 'no-text-evidence',
+            nextAction: built.totalCues ? null : 'Use video_frames or video_shots to inspect the visuals; text-only summary cannot infer visual-only content.',
+            segments: built.segments,
+            segmentSeconds: built.segmentSeconds,
+            totalCues: built.totalCues,
+            totalDanmaku: built.totalDanmaku,
+            danmaku: { count: danmaku.count, note: danmaku.note },
         },
       })
       value.digestText = renderDigestText({
@@ -1065,7 +1093,12 @@ function digestTool(ctx, cfg) {
         evidenceNote: value.nextAction,
         notes: value.notes,
       })
+      finishRun(progress, { ok: true, artifactsDir: meta.artifactsDir ?? null })
       return value
+    } catch (error) {
+      finishRun(progress, { ok: false, error })
+      throw error
+    }
     },
   }
 }
@@ -1095,8 +1128,16 @@ function askTool(ctx, cfg) {
       const question = String(args?.question ?? '').trim()
       if (!source) throw new Error('source is required')
       if (!question) throw new Error('question is required')
-      const meta = await metaOnly(ctx, cfg, exec, source)
-      const start = Math.max(0, Number(args?.start ?? 0) || 0)
+      const progress = startRun({ cfg, source, mode: 'ask', maxFrames: null })
+      try {
+        updateRun(progress, 'resolving')
+        const meta = await metaOnly(ctx, cfg, exec, source)
+        updateRun(progress, 'probing', {
+          detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
+          artifactsDir: meta.artifactsDir ?? null,
+          title: meta.title ?? null,
+        })
+        const start = Math.max(0, Number(args?.start ?? 0) || 0)
       const end = args?.end === undefined ? Number(meta.durationSec) : Number(args.end)
       const cues = (Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []).filter(
         (cue) => Number(cue.from) >= start - 0.2 && Number(cue.from) <= end,
@@ -1129,7 +1170,7 @@ function askTool(ctx, cfg) {
       ]
         .filter(Boolean)
         .join('\n')
-      return baseValue(meta, {
+      const value = baseValue(meta, {
         notes,
         value: {
           question,
@@ -1137,6 +1178,12 @@ function askTool(ctx, cfg) {
           evidenceText,
         },
       })
+      finishRun(progress, { ok: true, artifactsDir: meta.artifactsDir ?? null })
+      return value
+      } catch (error) {
+        finishRun(progress, { ok: false, error })
+        throw error
+      }
     },
   }
 }
@@ -1145,7 +1192,7 @@ function scenesTool(ctx, cfg) {
   return {
     name: 'video_scenes',
     description:
-      'Detect scene cuts in a Bilibili video or local file and return one image per detected cut (max 32) with timestamps, nearest subtitles, and a manifest. Equivalent to video_frames mode="scene" but focused on the cut list. Requires a routed model with image input; downloads the media once and reuses the cache.',
+      'Detect scene cuts in a Bilibili video or local file and return one image per detected cut (max 32) with timestamps, nearest subtitles, and a manifest. Equivalent to video_frames mode="scene" but focused on the cut list. When no cut is detected (single long shot), a middle frame is returned as a fallback and the result says so. Requires a routed model with image input; downloads the media once and reuses the cache.',
     parameters: {
       type: 'object',
       properties: {
@@ -1189,18 +1236,32 @@ function shotsTool(ctx, cfg) {
     async execute(args, exec) {
       const source = String(args?.source ?? '').trim()
       if (!source) throw new Error('source is required')
-      const meta = await metaOnly(ctx, cfg, exec, source)
-      if (meta.kind !== 'bilibili') {
-        throw new Error('video_shots only supports Bilibili; for local files use video_frames with mode="times" or mode="scene"')
-      }
-      const ff = meta.ffmpeg ?? (await resolveFfmpeg(cfg, { signal: exec?.signal }))
-      if (!ff?.available) throw new Error('ffmpeg is required to crop keyframe tiles but is unavailable')
-      const notes = [...(meta.notes ?? [])]
-      const shots = await fetchVideoShots({ bvid: meta.bvid, cid: meta.cid, signal: exec?.signal })
-      if (!shots.times.length || !shots.images.length) {
-        throw new Error('Bilibili returned no videoshot keyframe sprite for this video; use video_frames instead')
-      }
-      const start = Math.max(0, Number(args?.start ?? 0) || 0)
+      const progress = startRun({ cfg, source, mode: 'shots', maxFrames: null })
+      try {
+        updateRun(progress, 'resolving')
+        const meta = await metaOnly(ctx, cfg, exec, source)
+        updateRun(progress, 'probing', {
+          detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
+          artifactsDir: meta.artifactsDir ?? null,
+          title: meta.title ?? null,
+        })
+        if (meta.kind !== 'bilibili') {
+          throw new Error('video_shots only supports Bilibili; for local files use video_frames with mode="times" or mode="scene"')
+        }
+        const ff = meta.ffmpeg ?? (await resolveFfmpeg(cfg, { signal: exec?.signal }))
+        if (!ff?.available) {
+          const error = new Error('ffmpeg is required to crop keyframe tiles but is unavailable')
+          error.code = 'E_FFMPEG_MISSING'
+          throw error
+        }
+        const notes = [...(meta.notes ?? [])]
+        const shots = await fetchVideoShots({ bvid: meta.bvid, cid: meta.cid, signal: exec?.signal })
+        if (!shots.times.length || !shots.images.length) {
+          const error = new Error('Bilibili returned no videoshot keyframe sprite for this video; use video_frames instead')
+          error.code = 'E_NO_SPRITE'
+          throw error
+        }
+        const start = Math.max(0, Number(args?.start ?? 0) || 0)
       const end = args?.end === undefined ? Number(meta.durationSec) : Number(args.end)
       const picks = pickShotIndices({
         shots,
@@ -1218,7 +1279,7 @@ function shotsTool(ctx, cfg) {
         cacheDir: join(meta.artifactsDir, 'videoshot'),
         outDir,
         signal: exec?.signal,
-        quality: 3,
+        quality: Number(cfg.quality) || 3,
       })
       if (!captured.length) throw new Error('no keyframe tile could be cropped from the sprite')
       const cues = Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []
@@ -1260,7 +1321,12 @@ function shotsTool(ctx, cfg) {
         shots: value.shots,
         frames: withAttachments.map(({ attachment: _attachment, ...frame }) => frame),
       })
+      finishRun(progress, { ok: true, frames: frames.length, artifactsDir: meta.artifactsDir ?? null })
       return value
+      } catch (error) {
+        finishRun(progress, { ok: false, error })
+        throw error
+      }
     },
   }
 }
@@ -1371,7 +1437,7 @@ export function apply(ctx, config = {}) {
   // them, and the tools keep working.
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.5.0' })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.1' })
     } catch {}
   }
   try {
