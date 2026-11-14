@@ -376,7 +376,7 @@ async function capture(options) {
     maxFrames: options.maxFrames ?? options.params?.max_frames,
   })
   try {
-    const value = await captureInner({ ...options, progress })
+    const value = await captureInner({ ...options, progress, onEvent: runtimeReporter(progress) })
     finishRun(progress, {
       ok: true,
       frames: value?.sampling?.captured ?? value?.frames?.length ?? 0,
@@ -386,6 +386,13 @@ async function capture(options) {
   } catch (error) {
     finishRun(progress, { ok: false, error })
     throw error
+  }
+}
+
+/** Map runtime bootstrap events (first-use ffmpeg/yt-dlp download) to a phase. */
+function runtimeReporter(progress) {
+  return (event) => {
+    if (event?.type === 'runtime') updateRun(progress, 'runtime', { detail: event.detail ?? null })
   }
 }
 
@@ -418,6 +425,7 @@ async function captureInner(options) {
     download: true,
     source,
     log,
+    onEvent: options.onEvent,
   })
   updateRun(options.progress, 'probing', {
     detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
@@ -529,6 +537,29 @@ async function captureInner(options) {
     } else {
       notes.push(`scene detection returned ${candidates.length} cut(s) as the frame set`)
       captured = candidates
+      // A "single long shot" (a slide deck, a static camera) would otherwise
+      // yield one scene covering minutes. Pad the sparse cut list with evenly
+      // spaced frames so the storyboard still samples the whole span.
+      const span = range.end - range.start
+      if (captured.length < 3 && span > 90) {
+        const target = Math.min(maxFrames, Math.max(captured.length, Math.ceil(span / 30)))
+        const existing = new Set(captured.map((frame) => Math.round(frame.time)))
+        const paddedTimes = []
+        for (let i = 0; i < target && paddedTimes.length < target - captured.length; i += 1) {
+          const time = Math.round((range.start + ((i + 0.5) * span) / target) * 10) / 10
+          const rounded = Math.round(time)
+          if (existing.has(rounded) || existing.has(rounded - 1) || existing.has(rounded + 1)) continue
+          paddedTimes.push(time)
+        }
+        if (paddedTimes.length) {
+          const padded = await extractFrames(ff, meta.filePath, paddedTimes, framesDir, extractOptions)
+          const merged = [...captured, ...padded].sort((a, b) => a.time - b.time)
+          captured = merged
+          notes.push(
+            `only ${candidates.length} scene cut(s) in a ${Math.round(span)}s span; padded to ${captured.length} evenly spaced frame(s) so the storyboard covers the whole range`,
+          )
+        }
+      }
     }
     plan = { mode, times: captured.map((frame) => frame.time), notes: [] }
   } else {
@@ -842,6 +873,7 @@ function probeTool(ctx, cfg) {
           signal: exec?.signal,
           download: false,
           source,
+          onEvent: runtimeReporter(progress),
         })
         updateRun(progress, 'probing', {
           detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
@@ -1005,7 +1037,7 @@ function readTool(ctx, cfg) {
   }
 }
 
-async function metaOnly(ctx, cfg, exec, source) {
+async function metaOnly(ctx, cfg, exec, source, onEvent) {
   const meta = await resolveSource({
     ctx,
     cfg,
@@ -1013,6 +1045,7 @@ async function metaOnly(ctx, cfg, exec, source) {
     signal: exec?.signal,
     download: false,
     source,
+    onEvent,
   })
   return meta
 }
@@ -1043,7 +1076,7 @@ function digestTool(ctx, cfg) {
       const progress = startRun({ cfg, source, mode: 'digest', maxFrames: null })
       try {
         updateRun(progress, 'resolving')
-        const meta = await metaOnly(ctx, cfg, exec, source)
+        const meta = await metaOnly(ctx, cfg, exec, source, runtimeReporter(progress))
         updateRun(progress, 'probing', {
           detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
           artifactsDir: meta.artifactsDir ?? null,
@@ -1131,7 +1164,7 @@ function askTool(ctx, cfg) {
       const progress = startRun({ cfg, source, mode: 'ask', maxFrames: null })
       try {
         updateRun(progress, 'resolving')
-        const meta = await metaOnly(ctx, cfg, exec, source)
+        const meta = await metaOnly(ctx, cfg, exec, source, runtimeReporter(progress))
         updateRun(progress, 'probing', {
           detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
           artifactsDir: meta.artifactsDir ?? null,
@@ -1239,7 +1272,7 @@ function shotsTool(ctx, cfg) {
       const progress = startRun({ cfg, source, mode: 'shots', maxFrames: null })
       try {
         updateRun(progress, 'resolving')
-        const meta = await metaOnly(ctx, cfg, exec, source)
+        const meta = await metaOnly(ctx, cfg, exec, source, runtimeReporter(progress))
         updateRun(progress, 'probing', {
           detail: `${meta.kind}${meta.durationLabel ? ` · ${meta.durationLabel}` : ''}`,
           artifactsDir: meta.artifactsDir ?? null,
@@ -1437,7 +1470,7 @@ export function apply(ctx, config = {}) {
   // them, and the tools keep working.
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.5.1' })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.2' })
     } catch {}
   }
   try {

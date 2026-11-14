@@ -12,7 +12,7 @@
 
 **能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
 
-> **版本 0.5.1（三维度完善：可访问性 / 错误韧性 / 性能与反馈）**：面板按官方设置页规范重排（分组 fieldset、原生进度条不伪装百分比、字段级校验与首错聚焦、危险操作预览+确认+焦点返还、reduced-motion 支持、后台自动降频轮询）；全部失败路径挂结构化错误码（面板直接显示"码+人话"对照，见下方排查表）；进度上报覆盖 probe/digest/ask/shots 全部工具；yt-dlp 调用统一 `--ignore-config` 防全局配置破坏 CLI 契约；无字幕时返回显式原因（no-subs / needs-cookie / fetch-failed）与"画面正常，只是没有词"提示。0.5.0 的面板重设计/缓存安全记录见文末。
+> **版本 0.5.2（运行时可见性 / 资源前置检查 / 韧性打磨）**：首次自动下载 ffmpeg / yt-dlp 时面板显示「准备运行环境」阶段；下载前检查磁盘剩余空间（不足直接报 `E_DISK_FULL`，不再白传后失败）；单镜头长片（PPT/静态机位）自动按时间补帧保证分镜覆盖全片；B 站 API 重试加 ±25% 抖动防同步风暴；面板通知改为常挂载 live region（读屏播报更可靠）。0.5.1（错误码/可访问性/进度全覆盖）与更早记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -174,6 +174,7 @@ plugin_manager(action="install_bundle", target="E:\\path\\to\\dsh-video-read")
 | `E_NO_SPRITE` | 该视频没有 B 站 videoshot 精灵图 | `video_probe` 确认是 B 站 | 改用 `video_frames` |
 | `E_FILE_NOT_FOUND` | 本地文件路径不存在 | 核对路径与工作区 | 用绝对路径或相对工作区的路径 |
 | `E_DOWNLOAD` | 下载失败/卡死/超时 | 面板进度显示字节数 | 重试；网络不稳时调低画质 |
+| `E_DISK_FULL` | 目标卷剩余空间小于媒体上限 | 「此电脑」查看 `.video-read` 所在盘剩余空间 | 清理磁盘；面板清理过期缓存；或调低 `maxMediaBytes` |
 
 无字幕时的原因枚举（`subtitle.note` / `notes`）：`no-subs`（视频确实没有字幕——画面正常，只是没有词，请改用抽帧）、`needs-cookie`（未登录拿不到 AI 字幕，配 `cookieFile`）、`fetch-failed`（网络/接口临时失败，可重试）。
 
@@ -402,6 +403,20 @@ node scripts/panel-test.mjs            # Host 路由与安全契约：配置校�
 ## 仓库与许可
 
 - 源码仓库：<https://github.com/Kuest10n/dsh-video-read>
+
+### 2026-11-14 0.5.2 增量（运行时可见性 / 资源前置检查 / 韧性打磨）
+
+**1）runtime 阶段**：首次自动下载 ffmpeg / yt-dlp（约 50MB）时面板显示「准备运行环境」而不是停在「解析来源」假死；事件由 `resolveFfmpeg` / `ensureYtdlp` 经 `onEvent` 上报到进度文件。
+
+**2）下载前磁盘检查**：`resolveSource` 在真正下载前用 `statfs` 检查 `.video-read` 所在卷的剩余空间，小于 `maxMediaBytes` 直接抛 `E_DISK_FULL`（README 排查表新增此行）。借鉴 dsh-video-storyboard #74/#75/#81：那类插件是"下载完再被自己的缓存清理删掉"，前置拒绝更便宜也更诚实。
+
+**3）单镜头长片时间兜底**：`video_scenes` / `video_storyboard` 场景切点 < 3 且跨度 > 90s 时自动按时间均匀补帧（≤maxFrames），notes 说明"padded to N evenly spaced frames"，PPT 讲解类视频不再只有一张分镜（借鉴 dsh-video-storyboard #87）。
+
+**4）重试抖动**：B 站 API 退避重试加 ±25% 抖动，避免并行工具调用在退避后同步轰击（watch-skill #4 的退避实践）。
+
+**5）读屏播报**：面板顶部通知改为**常挂载** live region（内容切换而非挂载/卸载），`aria-live="polite"`；保存消息同步标注。
+
+**6）验证**：`node --check` 全过；m15 60/60、client 22/22、panel 20/20、self 36/36；真机回归见交付说明。
 
 ### 2026-11-14 0.5.1 增量（可访问性 / 错误韧性 / 性能与反馈）
 
