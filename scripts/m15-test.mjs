@@ -88,6 +88,10 @@ await mkdir(join(root, 'a'), { recursive: true })
 await writeFile(join(root, 'a', 'x.bin'), Buffer.alloc(2048))
 const old = new Date(Date.now() - 3 * 86_400_000)
 await utimes(join(root, 'a'), old, old)
+// cacheStatus uses the newest mtime in the whole source tree, so the child
+// artifact must be old too; otherwise an active frames/<runId>/ write would
+// (correctly) keep the directory fresh and this stale fixture would not prune.
+await utimes(join(root, 'a', 'x.bin'), old, old)
 await mkdir(join(root, 'b'), { recursive: true })
 await writeFile(join(root, 'b', 'y.bin'), Buffer.alloc(1024))
 const st = await cacheStatus(root, { ttlDays: 1 })

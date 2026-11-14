@@ -206,10 +206,12 @@ function unitChecks() {
     text: `cue ${index} ${'x'.repeat(50)}`,
   }))
   const timeline = formatTimeline(cues, { maxCues: 400, maxChars: 800 })
+  const lastCue = cues[cues.length - 1]
+  const expectedCoverage = Math.max(lastCue.from, lastCue.to ?? lastCue.from)
   check(
     'formatTimeline keeps coverage when it thins',
-    timeline.truncated === true && timeline.coversUntil === cues[cues.length - 1].from && timeline.lines.length > 0,
-    JSON.stringify({ stride: timeline.stride, coversUntil: timeline.coversUntil, lines: timeline.lines.length }),
+    timeline.truncated === true && timeline.coversUntil === expectedCoverage && timeline.lines.length > 0,
+    JSON.stringify({ stride: timeline.stride, coversUntil: timeline.coversUntil, lines: timeline.lines.length, expectedCoverage }),
   )
 
   check('cleanCueText strips HTML and newlines', cleanCueText('<b>hello</b>\nworld') === 'hello world', cleanCueText('<b>hello</b>\nworld'))
@@ -361,7 +363,7 @@ async function main() {
     const clip = await shortBilibiliClip()
     const url = `https://www.bilibili.com/video/${clip.bvid}`
     console.log(`[bilibili] using ${clip.bvid} duration=${clip.duration}s title=${clip.title}`)
-    const cookieFile = 'E:\\talkchat assisment\\OpenBiliClaw\\data\\bilibili_cookie.json'
+    const cookieFile = process.env.DSH_VIDEO_READ_BILIBILI_COOKIE || ''
     const bctx = fakeCtx({ modalities: ['text', 'image'] })
     apply(bctx.ctx, { cookieFile, maxFrames: 32 })
     const bexec = fakeExec(IMAGE_ROUTE)

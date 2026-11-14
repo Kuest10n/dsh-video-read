@@ -12,7 +12,7 @@
 
 **能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
 
-> **版本 0.5.3（设置面板三个反馈的修复）**：① 蓝色主按钮文字不可见 / 被裁成空块——改显式白字 + 单行 inline-flex 排版；② 点击外层 × 却像命中右下角按钮——面板按钮点击 `stopPropagation()` 隔离外层设置弹窗热区（本插件不渲染覆盖层）；③ 「保存失败：cross-origin or origin-less write refused」——GUI 内嵌客户端发不出 `Origin`，写保护改用「同源 Origin 或 Chromium `Sec-Fetch-Site: same-origin` 或插件客户端标记头」三选一放行，跨站与 curl 无信号请求仍然拒绝；另加未保存修改的 localStorage 草稿，关闭设置窗口后不再丢失。0.5.2（运行时可见性/磁盘预检）与更早记录见文末。
+> **版本 0.5.4（视觉描述模型下拉 + 一致性修复）**：设置页的「视觉描述模型」不再手填，而是由 Host 实时读取本机已注册且**明确声明图片输入**的模型，按 provider 分组显示；保存时自动写入 `captionProvider` + `captionModel` 成对配置，避免纯文本路由误把帧发给不支持图片的模型。另修复配置表单所有字段的 `onChange` 闭包串键、caption/附件预算、时间轴覆盖度、缓存活跃产物过期判定、下载超时与重定向校验等审查发现的问题。0.5.3（设置面板三个反馈的修复）：① 蓝色主按钮文字不可见 / 被裁成空块——改显式白字 + 单行 inline-flex 排版；② 点击外层 × 却像命中右下角按钮——面板按钮点击 `stopPropagation()` 隔离外层设置弹窗热区（本插件不渲染覆盖层）；③ 「保存失败：cross-origin or origin-less write refused」——GUI 内嵌客户端发不出 `Origin`，写保护改用「同源 Origin 或 Chromium `Sec-Fetch-Site: same-origin` 或插件客户端标记头」三选一放行，跨站与 curl 无信号请求仍然拒绝；另加未保存修改的 localStorage 草稿，关闭设置窗口后不再丢失。0.5.2（运行时可见性/磁盘预检）与更早记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -399,6 +399,18 @@ node scripts/panel-test.mjs            # Host 路由与安全契约：配置校�
 | 其它工具插件 | 工具名 | 无：全 profile 内 `video_probe / video_read / video_frames / video_digest / video_ask / video_scenes / video_shots / video_storyboard / video_cache` 均未被占用 |
 
 > 说明：冲突检查基于「工具名、HTTP 路由、客户端槽位 id/order」三类共享资源穷举；功能层面没有替代关系（media-desk 是媒体工作台，本插件是给 Agent 读视频的工具集）。
+
+### 2026-11-14 0.5.4 增量（视觉描述模型下拉 / 一致性修复）
+
+**1）视觉描述模型改为实时下拉**：Host 侧 `ctx.llm.listProviders()` + `listModels(provider.id)` 只收集 `inputModalities` 明确含 `image` 的模型；`panelSnapshot` 新增 `captionModels`，按 provider 分组 `<optgroup>`，带「留空 / 跟随当前路由」选项。旧的手填模型值若不在实时清单里，仍作为「当前设置」可选，不强制迁移。清单 30 秒 memo、单 provider 4 秒超时，面板 2s/15s 轮询不会反复打爆 adapter；若 llm 服务不可用，自动回退到手动录入 `["provider","model"]`。
+
+**2）保存不再只写半个配置**：下拉选中的复合值由 Client 拆成 `captionProvider` + `captionModel` 两个白名单键一起 POST，UI-only 的 `captionRoute` 不发给 Host；`captionFrames` 只有在两键同时非空、或当前路由本身支持图片时才允许把帧发给视觉模型，避免纯文本模型把图片发给自己。
+
+**3）审查修复**：配置表单 `var spec` → `const fieldSpec`，修掉所有输入框/复选框 onChange 都写入最后一个字段的严重串键 bug；配置数值、`captionMaxTokens`、`maxCaptionFrames`、`cacheTtlDays` 与运行态边界统一；ASS 厘秒、WebVTT NOTE/STYLE、字幕覆盖时间、缓存递归最新 mtime、下载总截止/中断/唯一临时文件、CDN 重定向校验、Unicode 检索、弹幕实体上限等一并修正；`attachBudget` 用 `Math.min`，有 caption 时工具输出不再说「只能依据时间轴/元数据」。
+
+**4）测试契约同步**：`panel-test` 33/33（临时 settings 目录、模型清单/复合值/跨 provider 过滤）、`client-test` 29/29（ready state 真渲染、select/optgroup、复合值拆两键、保存不传 UI-only 字段）、`m15-test` 60/60（递归 mtime 用例同步 utimes 子文件）、`self-test` 36/36（coversUntil 含 `to`，B 站 cookie 路径改环境变量）。
+
+---
 
 ### 2026-11-14 0.5.3 增量（面板保存修复）
 

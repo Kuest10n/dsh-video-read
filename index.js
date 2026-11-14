@@ -23,7 +23,7 @@ import { buildGrid } from './lib/grid.js'
 import { detectBlackEdges } from './lib/edges.js'
 import { cacheStatus, pruneCache } from './lib/cache.js'
 import { finishRun, readSettings, startRun, updateRun } from './lib/progress.js'
-import { mountPanel } from './lib/panel.js'
+import { mountPanel, invalidateWorkspaceCacheMemo } from './lib/panel.js'
 import {
   clampRange,
   formatClock,
@@ -34,7 +34,7 @@ import {
 } from './lib/frames.js'
 
 export const name = 'dsh-video-read'
-export const inject = ['tools', 'fs', 'attachments', 'workingDirectory']
+export const inject = ['tools', 'fs', 'attachments', 'workingDirectory', 'llm']
 
 const DEFAULT_CONFIG = {
   autoDownloadFfmpeg: true,
@@ -106,6 +106,20 @@ function flag(value, fallback) {
   return fallback
 }
 
+function boundedNumber(value, fallback, min, max) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback
+}
+
+function boundedRange(args, durationSec) {
+  const duration = Number.isFinite(Number(durationSec)) && Number(durationSec) > 0 ? Number(durationSec) : 0
+  const start = Math.min(duration, Math.max(0, boundedNumber(args?.start, 0, 0, duration || Number.MAX_SAFE_INTEGER)))
+  const end = duration
+    ? Math.min(duration, Math.max(start + 0.5, boundedNumber(args?.end, duration, 0, duration)))
+    : Math.max(start + 0.5, boundedNumber(args?.end, start + 0.5, 0, Number.MAX_SAFE_INTEGER))
+  return { start, end }
+}
+
 /**
  * Validate and normalize tool arguments before any IO (download, ffmpeg, disk).
  * Rejects impossible modes and bounds numeric inputs so a hostile or confused
@@ -114,7 +128,7 @@ function flag(value, fallback) {
 function normalizeParams(raw) {
   const params = { ...(raw ?? {}) }
   const mode = params.mode === undefined ? 'even' : String(params.mode)
-  if (!MODES.has(mode)) throw new Error(`mode must be one of "even", "times", "scene" (got "${mode}")`)
+  if (!MODES.has(mode)) throw new Error(`mode must be one of "even", "times", "scene", "grid" (got "${mode}")`)
   const fpsInput = params.fps === undefined ? 1 : Number(params.fps)
   const fps = Number.isFinite(fpsInput) ? Math.min(60, Math.max(0.05, fpsInput)) : 1
   const maxInput = params.max_frames === undefined ? undefined : Number(params.max_frames)
@@ -263,16 +277,20 @@ function summaryText(value) {
 
 function frameBlocks(value, options = {}) {
   const blocks = [text(summaryText(value))]
+  const frames = Array.isArray(value.frames) ? value.frames : []
+  const hasCaptions = frames.some((frame) => typeof frame?.caption === 'string' && frame.caption.trim())
   if (value.textOnlyFallback) {
+    const guidance = hasCaptions
+      ? 'Use the per-frame captions below as second-hand visual evidence; cite their timestamps and say they came from the caption model, not from this model directly seeing the image.'
+      : 'Answer only from timeline/metadata evidence and tell the user a text-only route cannot visually inspect frames.'
     blocks.push(
       text(
         `Image input is unavailable (${value.textOnlyFallbackReason}). ` +
           'Frames were captured to disk and the manifest has their paths, but they were not attached here. ' +
-          'Answer only from timeline/metadata evidence and tell the user a text-only route cannot visually inspect frames.',
+          guidance,
       ),
     )
   }
-  const frames = Array.isArray(value.frames) ? value.frames : []
   const grid = value.grid && value.grid.attachment && options.includeImages !== false ? value.grid : null
   if (grid) {
     blocks.push(
@@ -409,11 +427,15 @@ async function captureInner(options) {
   // C1 visual bridge: when the routed model cannot see images but a caption
   // model is configured, frames are captioned for text-only readers.
   const captionsMode = options.captions === undefined ? 'auto' : String(options.captions)
-  const captionModelAvailable = Boolean(cfg.captionProvider || cfg.captionModel)
-  const wantsCaptions =
-    captionsMode === 'always' || (captionsMode === 'auto' && !route.capable && captionModelAvailable)
-  if (wantsCaptions && !captionModelAvailable && !route.capable) {
-    notes.push('no caption model is configured, so no visual description was produced (set captionModel)')
+  const captionProvider = String(cfg.captionProvider ?? '').trim()
+  const captionModel = String(cfg.captionModel ?? '').trim()
+  const captionRouteAvailable = Boolean(captionProvider && captionModel)
+  const captionRoute = captionRouteAvailable ? `${captionProvider}/${captionModel}` : null
+  const wantsCaptions = captionsMode === 'always'
+    ? (route.capable || captionRouteAvailable)
+    : (captionsMode === 'auto' && !route.capable && captionRouteAvailable)
+  if (captionsMode === 'always' && !route.capable && !captionRouteAvailable) {
+    notes.push('no image-capable caption route is configured, so no visual description was produced (select a model in the Video Reader settings panel, or use an image-capable route)')
   }
 
   updateRun(options.progress, 'downloading')
@@ -623,13 +645,14 @@ async function captureInner(options) {
     notes.push('captions are ignored in grid mode; call video_frames with mode="times" for captioned frames')
   }
   const attachBudget = captionsRequested
-    ? Math.max(maxAttach, Math.min(8, Number(cfg.maxCaptionFrames) || 8))
+    ? Math.min(maxAttach, Math.max(1, Math.min(8, Number(cfg.maxCaptionFrames) || 8)))
     : maxAttach
   // Grid mode renders ONE contact-sheet image, so attaching each cell as well
   // would only spend image budget twice; the grid attachment is done later.
   const wantsFrameAttachments = (route.capable || captionsRequested) && wantsImages && !isGrid
   if (wantsFrameAttachments && frames.length > attachBudget) {
-    notes.push(`only the first ${attachBudget} of ${frames.length} frames were attached as images (maxAttachImages)`)
+    const budgetReason = captionsRequested ? 'caption frame budget' : 'maxAttachImages'
+    notes.push(`only the first ${attachBudget} of ${frames.length} frames were attached as images (${budgetReason})`)
   }
   const withAttachments = wantsFrameAttachments
     ? await attachFrames(ctx, frames, { maxImages: attachBudget, concurrency: frameConcurrency(cfg) })
@@ -649,7 +672,7 @@ async function captureInner(options) {
     for (const frame of withAttachments) {
       if (byIndex.has(frame.index)) frame.caption = byIndex.get(frame.index)
     }
-    if (captioned.captions.length) notes.push(`${captioned.captions.length} frame(s) captioned by ${cfg.captionProvider || route.provider}/${cfg.captionModel || route.model}`)
+    if (captioned.captions.length) notes.push(`${captioned.captions.length} frame(s) captioned by ${captionRoute || `${route.provider}/${route.model}`}`)
   }
 
   let grid = null
@@ -772,9 +795,9 @@ async function captureInner(options) {
 function probeValue(meta, route, cfg = {}) {
   const cues = Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []
   const sample = formatTimeline(cues, { maxCues: 20, maxChars: 4_000 })
-  const captionModel = cfg.captionModel || cfg.captionProvider
-    ? `${cfg.captionProvider || route.provider || '?'}/${cfg.captionModel || route.model || '?'}`
-    : null
+  const captionProvider = String(cfg.captionProvider ?? '').trim()
+  const captionModelId = String(cfg.captionModel ?? '').trim()
+  const captionModel = captionProvider && captionModelId ? `${captionProvider}/${captionModelId}` : null
   const modelFit = route.capable
     ? {
         kind: 'image+text',
@@ -785,7 +808,8 @@ function probeValue(meta, route, cfg = {}) {
         kind: 'text-only',
         use:
           'The routed model cannot see images. Use video_digest (subtitle/danmaku text timeline) and video_ask (retrieve moments) first; ' +
-          'frames are still written to disk but returned as text diagnostics only. Set captionModel/captionProvider in the plugin config to enable the C1 caption bridge, which turns sampled frames into text descriptions.',
+          'Frames are still written to disk but returned as text diagnostics only. ' +
+          'Select an image-capable model in the Video Reader settings panel to enable the C1 caption bridge, which turns sampled frames into text descriptions.',
         captionModel,
         captionBridgeEnabled: Boolean(captionModel),
       }
@@ -917,7 +941,7 @@ function framesTool(ctx, cfg) {
           items: { type: 'number', minimum: 0 },
           maxItems: MAX_TIMES,
           description:
-            'Explicit timestamps in seconds; only with mode="times". Lists longer than 32 are thinned (evenly kept) to the frame cap with a note, not rejected.',
+            'Explicit timestamps in seconds; only with mode="times". Up to 4096 entries are accepted; lists longer than the frame cap are thinned evenly with a note.',
         },
         start: { type: 'number', description: 'Optional start of the sampled range in seconds (default 0).' },
         end: { type: 'number', description: 'Optional end of the sampled range in seconds (default video duration).' },
@@ -927,7 +951,7 @@ function framesTool(ctx, cfg) {
           type: 'string',
           enum: ['auto', 'always', 'never'],
           description:
-            'Caption frames with an image-capable model for text-only readers: auto (default) only when the routed model cannot see images AND captionModel is configured; always = caption regardless; never = skip.',
+            'Caption frames with an image-capable model for text-only readers: auto (default) only when the routed model cannot see images and a complete captionProvider/captionModel pair is configured; always = caption regardless (requires an image-capable route); never = skip.',
         },
         skip_black_edges: {
           type: 'string',
@@ -999,7 +1023,7 @@ function readTool(ctx, cfg) {
         captions: {
           type: 'string',
           enum: ['auto', 'always', 'never'],
-          description: 'C1 visual bridge: caption frames with a configured captionModel. auto (default) captions only when the routed model cannot see images and a captionModel is configured; never disables it.',
+          description: 'C1 visual bridge: caption frames with a complete image-capable captionProvider/captionModel pair. auto (default) captions only when the routed model cannot see images and that pair is configured; never disables it.',
         },
         include_danmaku: { type: 'boolean', description: 'Also return a short Bilibili danmaku timeline (default false).' },
         skip_black_edges: {
@@ -1093,15 +1117,14 @@ function digestTool(ctx, cfg) {
             notes.push(`danmaku unavailable: ${error.message}`)
           }
         }
-        const start = Math.max(0, Number(args?.start ?? 0) || 0)
-        const end = args?.end === undefined ? Number(meta.durationSec) : Math.max(start + 0.5, Number(args.end) || 0)
+        const { start, end } = boundedRange(args, meta.durationSec)
         const built = buildSegments({
           cues,
           danmaku: danmaku.lines,
           startSec: start,
           endSec: end,
-          segmentSeconds: Number(args?.segment_seconds) || cfg.digestSegmentSeconds,
-          maxSegments: Number(args?.max_segments) || cfg.maxDigestSegments,
+          segmentSeconds: boundedNumber(args?.segment_seconds, cfg.digestSegmentSeconds, 10, 3600),
+          maxSegments: Math.round(boundedNumber(args?.max_segments, cfg.maxDigestSegments, 1, 50)),
         })
         const value = baseValue(meta, {
           notes: [...notes, ...(danmaku.note ? [danmaku.note] : []), ...(meta.subtitles?.note ? [meta.subtitles.note] : [])],
@@ -1170,8 +1193,7 @@ function askTool(ctx, cfg) {
           artifactsDir: meta.artifactsDir ?? null,
           title: meta.title ?? null,
         })
-        const start = Math.max(0, Number(args?.start ?? 0) || 0)
-      const end = args?.end === undefined ? Number(meta.durationSec) : Number(args.end)
+        const { start, end } = boundedRange(args, meta.durationSec)
       const cues = (Array.isArray(meta.subtitles?.cues) ? meta.subtitles.cues : []).filter(
         (cue) => Number(cue.from) >= start - 0.2 && Number(cue.from) <= end,
       )
@@ -1294,13 +1316,12 @@ function shotsTool(ctx, cfg) {
           error.code = 'E_NO_SPRITE'
           throw error
         }
-        const start = Math.max(0, Number(args?.start ?? 0) || 0)
-      const end = args?.end === undefined ? Number(meta.durationSec) : Number(args.end)
+        const { start, end } = boundedRange(args, meta.durationSec)
       const picks = pickShotIndices({
         shots,
         start,
         end,
-        max: Number(args?.max_shots) || Number(cfg.maxShots) || 8,
+        max: Math.round(boundedNumber(args?.max_shots, cfg.maxShots, 1, 20)),
       })
       if (!picks.length) throw new Error('no keyframe from the sprite falls inside the requested range')
       const runId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}-shots`
@@ -1385,7 +1406,7 @@ function storyboardTool(ctx, cfg) {
         captions: {
           type: 'string',
           enum: ['auto', 'always', 'never'],
-          description: 'Caption each scene with an image-capable model (auto = only when the routed model has no image input and captionModel is configured).',
+          description: 'Caption each scene with an image-capable model (auto = only when the routed model has no image input and a complete captionProvider/captionModel pair is configured).',
         },
         include_timeline: { type: 'boolean', description: 'Include the subtitle timeline text in the result (default true).' },
       },
@@ -1434,7 +1455,7 @@ function cacheTool(ctx, cfg) {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['status', 'prune'], description: 'status (default) lists the cache; prune removes stale entries.' },
-        ttl_days: { type: 'number', minimum: 0, description: 'Override the staleness window in days (default from config).' },
+        ttl_days: { type: 'number', minimum: 0.01, description: 'Override the staleness window in days (default from config cacheTtlDays, 14 days). Must be positive.' },
         dry_run: { type: 'boolean', description: 'For prune: preview without deleting (default true). Must be explicitly false to delete.' },
       },
       additionalProperties: false,
@@ -1445,10 +1466,11 @@ function cacheTool(ctx, cfg) {
       const rootDir = join(sessionCwd(ctx, exec), '.video-read')
       const action = args?.action === 'prune' ? 'prune' : 'status'
       const ttlDays = args?.ttl_days === undefined ? Number(cfg.cacheTtlDays) || 14 : Number(args.ttl_days)
-      if (!Number.isFinite(ttlDays) || ttlDays < 0) throw new Error('ttl_days must be a non-negative number')
+      if (!Number.isFinite(ttlDays) || ttlDays <= 0) throw new Error('ttl_days must be a positive number of days')
       if (action === 'prune') {
         const dryRun = args?.dry_run !== false
         const pruned = await pruneCache(rootDir, { ttlDays, dryRun })
+        if (!dryRun) invalidateWorkspaceCacheMemo()
         return { ok: true, action, dryRun, ...pruned }
       }
       const status = await cacheStatus(rootDir, { ttlDays })
@@ -1468,9 +1490,14 @@ export function apply(ctx, config = {}) {
   // undefined here. Waiting through ctx.inject(['webServer']) mounts the routes
   // as soon as the carrier exists; an Electron-only profile simply never mounts
   // them, and the tools keep working.
+  // The settings panel needs the LLM registry to enumerate image-capable
+  // caption models. Resolve it from the Host plugin's own injected context:
+  // the web carrier may be a different fiber that cannot access `llm`.
+  let llmRuntime = null
+  try { llmRuntime = ctx.get('llm') ?? ctx.llm ?? null } catch {}
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.5.3' })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.4', llm: llmRuntime })
     } catch {}
   }
   try {

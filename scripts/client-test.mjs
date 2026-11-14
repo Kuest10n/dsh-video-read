@@ -107,18 +107,36 @@ try {
 }
 check('apply survives a rejected registration', survived)
 
-// Render the panel with a real response shape. This catches the common failure
-// where a bundle registers correctly but its component throws only after data
-// arrives (the old 15 checks never rendered it).
+// Render the panel with a populated response, including the live model
+// catalog. The old useState stub always returned `loading`, so it never
+// exercised the real settings form; this one returns a ready snapshot and
+// captures the draft setter so the caption <select> can be driven offline.
 const rendered = []
 let effect = null
+let hookIndex = 0
+let capturedDraft = null
+const captionValue = '["vision-provider","vision-model"]'
+const draftEdits = {
+  captionProvider: 'vision-provider',
+  captionModel: 'vision-model',
+  captionRoute: captionValue,
+}
 const renderHooks = {
   createElement: (type, props, ...children) => {
     const node = { type, props: props || {}, children }
     rendered.push(node)
     return node
   },
-  useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+  useState: (initial) => {
+    hookIndex += 1
+    if (hookIndex === 1) return [{ status: 'ready', data: fixture, error: null, stale: false }, () => {}]
+    if (hookIndex === 2) {
+      return [draftEdits, (updater) => {
+        capturedDraft = typeof updater === 'function' ? updater(draftEdits) : updater
+      }]
+    }
+    return [typeof initial === 'function' ? initial() : initial, () => {}]
+  },
   useEffect: (callback) => { effect = callback },
   __effects: () => effect,
 }
@@ -130,20 +148,30 @@ registrations.length = 0
 panelModule.apply(ctx)
 const panelEntry = registrations[0]
 const fixture = {
-  version: '0.5.0',
-  config: { maxFrames: 16, quality: 3, bilibiliQuality: 64, autoDownloadFfmpeg: true },
-  progress: { phase: 'downloading', bytes: 50, totalBytes: 100, done: false },
-  cache: {
-    root: 'C:/cache', totalBytes: 1024, settingsPath: 'C:/cache/settings.json', dirs: [],
-    workspaceCache: { rootDir: 'C:/workspace/.video-read', totalBytes: 2048, staleBytes: 512, dirCount: 1, ttlDays: 14 },
+  version: '0.5.4',
+  config: { maxFrames: 16, quality: 3, bilibiliQuality: 64, autoDownloadFfmpeg: true, captionProvider: 'vision-provider', captionModel: 'vision-model' },
+  captionModels: {
+    selected: captionValue,
+    current: { provider: 'vision-provider', model: 'vision-model' },
+    count: 1,
+    note: null,
+    items: [{ provider: 'vision-provider', model: 'vision-model', value: captionValue, label: 'Vision Model', providerName: 'Vision Provider', supportsImage: true }],
+    groups: [{ provider: 'vision-provider', providerName: 'Vision Provider', models: [{ value: captionValue, label: 'Vision Model' }] }],
   },
+  progress: { phase: 'downloading', bytes: 50, totalBytes: 100, done: false },
+  cache: { root: 'C:/cache', totalBytes: 1024, settingsPath: 'C:/cache/settings.json', dirs: [] },
+  workspaceCache: { rootDir: 'C:/workspace/.video-read', totalBytes: 2048, staleBytes: 512, dirCount: 1, ttlDays: 14 },
 }
 const originalFetch = globalThis.fetch
 const originalDocument = globalThis.document
 let fetchedPath = ''
+let postedConfig = null
 let removedVisibilityListener = false
-globalThis.fetch = async (path) => {
+globalThis.fetch = async (path, options) => {
   fetchedPath = String(path)
+  if (options?.body) {
+    try { postedConfig = JSON.parse(options.body).config } catch {}
+  }
   return { ok: true, json: async () => fixture }
 }
 globalThis.document = {
@@ -153,15 +181,38 @@ globalThis.document = {
 }
 let tree = null
 let cleanup = null
+const tick = () => new Promise((resolve) => setTimeout(resolve, 1))
 try {
   tree = panelEntry.component()
   check('panel renders a populated response', tree !== null)
   if (typeof effect === 'function') cleanup = effect()
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  await tick()
   check('panel polls the namespaced host route', fetchedPath === '/api/dsh-video-read/panel', fetchedPath)
   check('panel renders without guessing legacy theme tokens', !source.includes('--dsh-surface') && source.includes('--dsw-alias-bg-layer-1'))
   check('panel includes actionable onboarding', source.includes('三步开始') && source.includes('先看文本，再看画面'))
   check('panel cleans through the dedicated cache route', source.includes('API + "/cache"') && source.includes('PRUNE_STALE'))
+  check('config fields use block-scoped fieldSpec', source.includes('const fieldSpec') && !source.includes('var spec = byKey'))
+  const select = rendered.find((node) => node.type === 'select' && node.props['aria-label'] === '视觉描述模型')
+  check('caption model renders as a select', Boolean(select) && select.props.value === captionValue, JSON.stringify(select?.props))
+  check('caption model options are grouped by provider', rendered.some((node) => node.type === 'optgroup' && node.props.label === 'Vision Provider'))
+  check('caption model list contains the image-capable option', rendered.some((node) => node.type === 'option' && node.props.value === captionValue))
+  select.props.onChange({ target: { value: '["vision-provider","vision-model-2"]' } })
+  check('selecting a caption route splits provider and model into two config keys',
+    capturedDraft &&
+    capturedDraft.captionProvider === 'vision-provider' &&
+    capturedDraft.captionModel === 'vision-model-2' &&
+    !Object.prototype.hasOwnProperty.call(capturedDraft, 'captionRoute'),
+    JSON.stringify(capturedDraft))
+  const saveButton = rendered.find((node) => node.type === 'button' && node.children.includes('保存设置'))
+  check('save button is rendered', Boolean(saveButton))
+  saveButton.props.onClick({ stopPropagation() {} })
+  await tick()
+  check('save posts both whitelisted caption keys and drops the UI-only composite',
+    postedConfig &&
+    postedConfig.captionProvider === 'vision-provider' &&
+    postedConfig.captionModel === 'vision-model' &&
+    !Object.prototype.hasOwnProperty.call(postedConfig, 'captionRoute'),
+    JSON.stringify(postedConfig))
 } catch (error) {
   check('panel renders a populated response', false, String(error?.stack ?? error))
 } finally {

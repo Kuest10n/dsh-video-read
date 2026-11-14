@@ -5,9 +5,10 @@
 # or from a local checkout:
 #   plugin_manager(action="install_bundle", target="E:\\path\\to\\dsh-video-read")
 #
-# Machine-specific values (Bilibili cookie file, custom ffmpeg path, caption model)
-# are intentionally left empty here; set them in the Web settings panel
-# (Settings -> Video Reader) or in ~/.dsh/cache/dsh-video-read/settings.json.
+# The Web settings panel exposes caption model selection (enumerated from the
+# local DSH LLM registry). Machine-specific cookie / ffmpeg / yt-dlp paths stay
+# out of the web form for safety: set them in cordis.patch.yml, environment
+# variables, or ~/.dsh/cache/dsh-video-read/settings.json.
 - insert:
     - id: dsh-video-read
       name: 'dsh-video-read'
@@ -15,5 +16,5 @@
         autoDownloadFfmpeg: true
         autoDownloadYtdlp: true
         cookieFile: ''
-        maxFrames: 32
+        maxFrames: 16
         keepSource: true
