@@ -1470,7 +1470,7 @@ export function apply(ctx, config = {}) {
   // them, and the tools keep working.
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.5.2' })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.3' })
     } catch {}
   }
   try {

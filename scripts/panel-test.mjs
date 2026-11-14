@@ -36,11 +36,13 @@ const cfg = { cacheDir: '', cacheTtlDays: 14, quality: 3 }
 const mounted = mountPanel({ ctx: context, cfg, version: '0.5.0' })
 ok('panel mounts three namespaced exact routes', mounted.paths.length === 3 && routes.has('/api/dsh-video-read/cache'))
 
-function request(path, { method = 'GET', origin = 'http://127.0.0.1:60299', contentType = 'application/json', body = null, host = '127.0.0.1:60299' } = {}) {
+function request(path, { method = 'GET', origin = 'http://127.0.0.1:60299', contentType = 'application/json', body = null, host = '127.0.0.1:60299', fetchSite = null, clientHeader = false } = {}) {
   let finished = false
   const req = { method, headers: { host }, [Symbol.asyncIterator]: async function * () { if (body !== null) yield Buffer.from(body) } }
   if (origin !== null) req.headers.origin = origin
   if (contentType !== null) req.headers['content-type'] = contentType
+  if (fetchSite !== null) req.headers['sec-fetch-site'] = fetchSite
+  if (clientHeader) req.headers['x-dsh-video-read-client'] = '1'
   const result = new Promise((resolve, reject) => {
     var _res = {
       writeHead(status, headers) { this.status = status; this.headers = headers },
@@ -56,6 +58,14 @@ function request(path, { method = 'GET', origin = 'http://127.0.0.1:60299', cont
 
 const hostile = await request('/api/dsh-video-read/config', { method: 'POST', origin: 'https://evil.example', body: '{"maxFrames":2}' })
 ok('cross-origin config write is refused', hostile.status === 403)
+const barePost = await request('/api/dsh-video-read/config', { method: 'POST', origin: null, body: '{"maxFrames":9999}' })
+ok('origin-less write without any signal is refused', barePost.status === 403)
+const fetchSitePost = await request('/api/dsh-video-read/config', { method: 'POST', origin: null, fetchSite: 'same-origin', body: '{"maxFrames":32}' })
+ok('origin-less write with Sec-Fetch-Site same-origin is accepted (the GUI path)', fetchSitePost.status === 200 && fetchSitePost.body.ok === true)
+const clientPost = await request('/api/dsh-video-read/config', { method: 'POST', origin: null, clientHeader: true, body: '{"maxFrames":32}' })
+ok('origin-less write with the client marker header is accepted', clientPost.status === 200 && clientPost.body.ok === true)
+const crossSiteFetchPost = await request('/api/dsh-video-read/config', { method: 'POST', origin: null, fetchSite: 'cross-site', body: '{"maxFrames":8}' })
+ok('origin-less write claiming cross-site fetch is refused', crossSiteFetchPost.status === 403)
 const textPost = await request('/api/dsh-video-read/config', { method: 'POST', contentType: 'text/plain', body: '{"maxFrames":2}' })
 ok('non-JSON config write is refused', textPost.status === 415)
 const rebound = await request('/api/dsh-video-read/panel', { host: 'evil.example' })

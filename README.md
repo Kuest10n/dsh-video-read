@@ -12,7 +12,7 @@
 
 **能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
 
-> **版本 0.5.2（运行时可见性 / 资源前置检查 / 韧性打磨）**：首次自动下载 ffmpeg / yt-dlp 时面板显示「准备运行环境」阶段；下载前检查磁盘剩余空间（不足直接报 `E_DISK_FULL`，不再白传后失败）；单镜头长片（PPT/静态机位）自动按时间补帧保证分镜覆盖全片；B 站 API 重试加 ±25% 抖动防同步风暴；面板通知改为常挂载 live region（读屏播报更可靠）。0.5.1（错误码/可访问性/进度全覆盖）与更早记录见文末。
+> **版本 0.5.3（设置面板三个反馈的修复）**：① 蓝色主按钮文字不可见 / 被裁成空块——改显式白字 + 单行 inline-flex 排版；② 点击外层 × 却像命中右下角按钮——面板按钮点击 `stopPropagation()` 隔离外层设置弹窗热区（本插件不渲染覆盖层）；③ 「保存失败：cross-origin or origin-less write refused」——GUI 内嵌客户端发不出 `Origin`，写保护改用「同源 Origin 或 Chromium `Sec-Fetch-Site: same-origin` 或插件客户端标记头」三选一放行，跨站与 curl 无信号请求仍然拒绝；另加未保存修改的 localStorage 草稿，关闭设置窗口后不再丢失。0.5.2（运行时可见性/磁盘预检）与更早记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -399,6 +399,18 @@ node scripts/panel-test.mjs            # Host 路由与安全契约：配置校�
 | 其它工具插件 | 工具名 | 无：全 profile 内 `video_probe / video_read / video_frames / video_digest / video_ask / video_scenes / video_shots / video_storyboard / video_cache` 均未被占用 |
 
 > 说明：冲突检查基于「工具名、HTTP 路由、客户端槽位 id/order」三类共享资源穷举；功能层面没有替代关系（media-desk 是媒体工作台，本插件是给 Agent 读视频的工具集）。
+
+### 2026-11-14 0.5.3 增量（面板保存修复）
+
+**1）保存按钮文字不可见 / 被裁成一个空蓝色块**：主按钮文字此前用 `var(--dsw-alias-bg-base, #fff)`——该 token 在深色主题解析为深色背景色，蓝底深字等于看不见。改为显式 `#ffffff`；同时给按钮加 `display:inline-flex`、居中、`whiteSpace:nowrap`、`lineHeight:1.25`、`minHeight:36`、`padding:8px 16px`，窄设置面板也不再折行裁切。
+
+**2）「点击关闭 × 却像点到了右下角按钮」**：× 属于外层设置弹窗，本插件不渲染任何覆盖层或绝对定位元素。给所有面板按钮的点击加 `event.stopPropagation()`，避免点击冒泡到设置弹窗的关闭热区；按钮本身保持普通文档流（无 `position`/`zIndex`），不与外层弹窗层叠。
+
+**3）「保存失败：cross-origin or origin-less write refused」**：GUI 的设置区块运行在无 `Origin` 的内嵌上下文里，此前"写请求必须带 Origin"的 CSRF 防线把宿主自己的保存请求也拦了。新写保护：同源 `Origin` / Chromium 自动附加的 `Sec-Fetch-Site: same-origin` / 插件客户端标记头 `x-dsh-video-read-client: 1` 三者满足其一即放行——跨站 `mode:'no-cors'` 攻击三样都给不出（自定义头会触发本服务器不应答的 CORS 预检），curl 等无信号请求仍然 403，`application/json` 硬性要求不变。`/config` 与 `/cache` 两条写路由同规则。
+
+**4）关闭窗口不再丢修改**：未保存的字段改动实时镜像到 `localStorage`（键 `dsh-video-read.draft-config`），关掉设置重开后自动还原；只有保存成功或点「放弃未保存修改」才清除。localStorage 不可用的环境自动降级为仅内存草稿。`DEFAULTS` 补 `bilibiliQuality: 64`，「填入推荐值」不再漏键。
+
+**5）测试与真机**：`panel-test` 从 20 项扩到 28 项（新增无信号 403 / Sec-Fetch-Site 放行 / 客户端标记头放行 / cross-site 拒绝四类），`client-test` 22 项、`m15-test` 60 项、`self-test` 36 项；真机 `GET /api/dsh-video-read/panel` 返回 `version=0.5.3`，无 `Origin` 的 `/config` 保存返回 200 且 `imageWidth` 即时生效，`Origin: http://evil.example` 仍 403（验证后已还原测试值）。
 
 ## 仓库与许可
 
