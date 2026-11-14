@@ -2,18 +2,19 @@
 import { parseDanmakuXml } from '../lib/danmaku.js'
 import { buildSegments, renderDigestText } from '../lib/digest.js'
 import { rankEvidence } from '../lib/ask.js'
-import { pickShotIndices } from '../lib/shots.js'
+import { assertShotCdnUrl, pickShotIndices, spriteStripName, assertJpegStrip } from '../lib/shots.js'
 import { parseYtdlpJson, ytdlpCandidates } from '../lib/youtube.js'
 import { planSampleTimes } from '../lib/frames.js'
 import { buildStoryboard } from '../lib/storyboard.js'
 import { planGridCells } from '../lib/grid.js'
 import { cacheStatus, pruneCache } from '../lib/cache.js'
 import { editableConfig, mountPanel, sanitizeConfigPatch } from '../lib/panel.js'
-import { assertPublicHttpUrl, assertPublicUrlResolvesPublicly, directMediaExtension, isPrivateAddress } from '../lib/sources.js'
+import { assertPublicHttpUrl, assertPublicUrlResolvesPublicly, directMediaExtension, isPrivateAddress, prepareArtifactsBase } from '../lib/sources.js'
+import { assertBilibiliCdnUrl } from '../lib/bilibili.js'
 import { fetchWithDeadline } from '../lib/net.js'
 import { parseBlackIntervals } from '../lib/edges.js'
 import { createServer } from 'node:http'
-import { mkdtemp, mkdir, writeFile, utimes, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, stat, writeFile, utimes, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -109,6 +110,38 @@ try {
 }
 check('cache prune guard', guard)
 await rm(tmp, { recursive: true, force: true })
+
+// 8b. prepareArtifactsBase must not delete a source directory whose root is
+// old but whose frames/<runId>/ artifacts were just written.
+const cleanTmp = await mkdtemp(join(tmpdir(), 'vrartifacts-'))
+const cleanRoot = join(cleanTmp, '.video-read')
+const oldRoot = join(cleanRoot, 'active-source')
+const staleRoot = join(cleanRoot, 'stale-source')
+await mkdir(join(oldRoot, 'frames', 'run-1'), { recursive: true })
+await mkdir(staleRoot, { recursive: true })
+await writeFile(join(oldRoot, 'frames', 'run-1', 'frame.jpg'), Buffer.alloc(1024))
+await writeFile(join(staleRoot, 'source.mp4'), Buffer.alloc(1024))
+const staleTime = new Date(Date.now() - 3 * 86_400_000)
+await utimes(oldRoot, staleTime, staleTime)
+await utimes(join(oldRoot, 'frames'), staleTime, staleTime)
+await utimes(join(oldRoot, 'frames', 'run-1'), staleTime, staleTime)
+await utimes(staleRoot, staleTime, staleTime)
+await utimes(join(staleRoot, 'source.mp4'), staleTime, staleTime)
+await prepareArtifactsBase(cleanTmp, { cacheTtlDays: 1 })
+let activeKept = false
+let staleDeleted = false
+try {
+  await stat(oldRoot)
+  activeKept = true
+} catch {}
+try {
+  await stat(staleRoot)
+} catch {
+  staleDeleted = true
+}
+check('artifact prune keeps active frames tree', activeKept, oldRoot)
+check('artifact prune removes fully stale tree', staleDeleted, staleRoot)
+await rm(cleanTmp, { recursive: true, force: true })
 
 // 9. contact-sheet grid planning
 const g16 = planGridCells(16)
@@ -239,6 +272,58 @@ const tooManyImages = sanitizeConfigPatch({ maxAttachImages: 32 }, baseConfig)
 check('attach cap rejects 32', tooManyImages.ok === false, JSON.stringify(tooManyImages.errors))
 const allowedImages = sanitizeConfigPatch({ maxAttachImages: 20 }, baseConfig)
 check('attach cap allows 20', allowedImages.ok === true && allowedImages.patch?.maxAttachImages === 20, JSON.stringify(allowedImages))
+
+// 16. videoshot sprite URL allowlist + URL-derived cache name + JPEG magic check.
+let shotCdnOk = false
+try {
+  shotCdnOk = assertShotCdnUrl('https://i0.hdslb.com/bfs/videoshot/abc.jpg', 'test sprite').startsWith('https://')
+} catch {}
+check('shot CDN allows Bilibili host', shotCdnOk)
+let shotPrivateBlocked = false
+let shotForeignBlocked = false
+try {
+  assertShotCdnUrl('https://127.0.0.1/strip.jpg', 'test sprite')
+} catch {
+  shotPrivateBlocked = true
+}
+try {
+  assertShotCdnUrl('https://evil.example/strip.jpg', 'test sprite')
+} catch {
+  shotForeignBlocked = true
+}
+check('shot CDN blocks private and foreign hosts', shotPrivateBlocked && shotForeignBlocked)
+check('shot strip cache name includes URL hash', spriteStripName('https://i0.hdslb.com/a.jpg', 1) !== spriteStripName('https://i0.hdslb.com/b.jpg', 1))
+const shotProbe = await mkdtemp(join(tmpdir(), 'vrshot-'))
+const jpegProbe = join(shotProbe, 'strip.jpg')
+const htmlProbe = join(shotProbe, 'strip.html')
+await writeFile(jpegProbe, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]))
+await writeFile(htmlProbe, Buffer.from('<!doctype html>', 'utf8'))
+let jpegOk = false
+let htmlBlocked = false
+try {
+  await assertJpegStrip(jpegProbe)
+  jpegOk = true
+} catch {}
+try {
+  await assertJpegStrip(htmlProbe)
+} catch {
+  htmlBlocked = true
+}
+check('shot strip JPEG magic guard', jpegOk && htmlBlocked)
+await rm(shotProbe, { recursive: true, force: true })
+
+// 17. Bilibili CDN validator is exported and rejects private/foreign hosts.
+let biliCdnOk = false
+let biliCdnBlocked = false
+try {
+  biliCdnOk = assertBilibiliCdnUrl('https://upos-sz-mirrorali.bilivideo.cn/upgcxcode/x.m4s', 'test media').startsWith('https://')
+} catch {}
+try {
+  assertBilibiliCdnUrl('https://evil.example/x.m4s', 'test media')
+} catch {
+  biliCdnBlocked = true
+}
+check('Bilibili CDN validator exported', biliCdnOk && biliCdnBlocked)
 
 console.log(`
 ${fail ? 'FAILED' : 'ALL OK'} ${pass}/${pass + fail}`)

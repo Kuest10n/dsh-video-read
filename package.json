@@ -1,6 +1,6 @@
 {
   "name": "dsh-video-read",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Give a DSH agent a video link or local file: acquire, sample frames at a chosen fps, read the timeline subtitles, and answer with visual evidence.",
   "type": "module",
   "main": "index.js",

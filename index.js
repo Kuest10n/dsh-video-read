@@ -1497,7 +1497,7 @@ export function apply(ctx, config = {}) {
   try { llmRuntime = ctx.get('llm') ?? ctx.llm ?? null } catch {}
   const mountPanelRoutes = (hostCtx) => {
     try {
-      mountPanel({ ctx: hostCtx, cfg, version: '0.5.4', llm: llmRuntime })
+      mountPanel({ ctx: hostCtx, cfg, version: '0.5.5', llm: llmRuntime })
     } catch {}
   }
   try {

@@ -12,7 +12,7 @@
 
 **能力边界**：当前模型声明图片输入时才能直接看图；纯文本模型可使用字幕摘要/检索，并可通过独立视觉模型生成画面描述。没有字幕不代表插件能理解所有画面内容，此时请明确让 Agent 抽帧。插件不会绕过 DRM 或抖音风控。
 
-> **版本 0.5.4（视觉描述模型下拉 + 一致性修复）**：设置页的「视觉描述模型」不再手填，而是由 Host 实时读取本机已注册且**明确声明图片输入**的模型，按 provider 分组显示；保存时自动写入 `captionProvider` + `captionModel` 成对配置，避免纯文本路由误把帧发给不支持图片的模型。另修复配置表单所有字段的 `onChange` 闭包串键、caption/附件预算、时间轴覆盖度、缓存活跃产物过期判定、下载超时与重定向校验等审查发现的问题。0.5.3（设置面板三个反馈的修复）：① 蓝色主按钮文字不可见 / 被裁成空块——改显式白字 + 单行 inline-flex 排版；② 点击外层 × 却像命中右下角按钮——面板按钮点击 `stopPropagation()` 隔离外层设置弹窗热区（本插件不渲染覆盖层）；③ 「保存失败：cross-origin or origin-less write refused」——GUI 内嵌客户端发不出 `Origin`，写保护改用「同源 Origin 或 Chromium `Sec-Fetch-Site: same-origin` 或插件客户端标记头」三选一放行，跨站与 curl 无信号请求仍然拒绝；另加未保存修改的 localStorage 草稿，关闭设置窗口后不再丢失。0.5.2（运行时可见性/磁盘预检）与更早记录见文末。
+> **版本 0.5.5（0.5.4 后的安全/正确性补丁）**：继续完善视频阅读插件。0.5.4 让设置页的「视觉描述模型」改为由 Host 实时读取本机已注册、明确声明图片输入的模型下拉，按 provider 分组，保存时写入 `captionProvider` + `captionModel` 成对配置；同时修复表单 `onChange` 闭包串键、caption/附件预算、时间轴覆盖度、缓存活跃产物过期判定、下载超时与重定向校验。0.5.5 补丁继续修复活跃帧目录清理、B 站/关键帧 CDN 逐跳校验、字幕重试与关键帧缓存污染。0.5.3（设置面板三个反馈的修复）：① 蓝色主按钮文字不可见 / 被裁成空块——改显式白字 + 单行 inline-flex 排版；② 点击外层 × 却像命中右下角按钮——面板按钮点击 `stopPropagation()` 隔离外层设置弹窗热区（本插件不渲染覆盖层）；③ 「保存失败：cross-origin or origin-less write refused」——GUI 内嵌客户端发不出 `Origin`，写保护改用「同源 Origin 或 Chromium `Sec-Fetch-Site: same-origin` 或插件客户端标记头」三选一放行，跨站与 curl 无信号请求仍然拒绝；另加未保存修改的 localStorage 草稿，关闭设置窗口后不再丢失。0.5.2（运行时可见性/磁盘预检）与更早记录见文末。
 >
 > 抖音因 2026-10 起引入 `x-secsdk-web-signature` 风控、公开提取器失效，本插件**不实现绕过**，遇到抖音链接会返回明确的结构化错误；DRM 视频（Netflix / 迪士尼 / 爱奇艺 VIP / 腾讯 VIP 等）一律拒绝。
 
@@ -399,6 +399,20 @@ node scripts/panel-test.mjs            # Host 路由与安全契约：配置校�
 | 其它工具插件 | 工具名 | 无：全 profile 内 `video_probe / video_read / video_frames / video_digest / video_ask / video_scenes / video_shots / video_storyboard / video_cache` 均未被占用 |
 
 > 说明：冲突检查基于「工具名、HTTP 路由、客户端槽位 id/order」三类共享资源穷举；功能层面没有替代关系（media-desk 是媒体工作台，本插件是给 Agent 读视频的工具集）。
+
+### 2026-11-14 0.5.5 增量（残留安全/正确性补丁）
+
+**1）活跃帧目录不再被清理误删**：把 `newestMtime()` 从 `lib/cache.js` 导出，`prepareArtifactsBase()` 改用整棵产物树的递归最新 mtime 判断过期；`truncated`（文件太多）或时间未知时保守保留，避免根目录 mtime 很旧、但 `frames/<runId>/` 刚刚写入的活跃任务被删除。新增 m15 回归：旧根目录 + 新帧文件必须保留，全树都旧才删除。
+
+**2）CDN 重定向每一跳都校验**：B 站字幕与媒体下载、videoshot API / sprite 下载全部给 `fetchWithDeadline` / `downloadToFile` 传 `validateUrl`；首个 URL 与 302 后的每个 hop 都要满足 https、无凭据、443 端口、非私网 IP 与 Bilibili CDN 白名单。CDN 不能再借一次重定向把下载引到任意主机或内网。
+
+**3）关键帧缓存与文件类型**：videoshot sprite 缓存名加入 `sha256(imageUrl)`，URL 变了不会复用旧 sprite；下载后校验 JPEG SOI 标记，HTML/错误页不会被 ffmpeg 当作图像解码；`img_x_len / img_y_len / img_x_size / img_y_size` 都夹到 ≥1，避免 0/NaN 让 tile 计算静默失效。
+
+**4）字幕失败可重试**：B 站下载分支不再因 `existing` 元数据存在就永远跳过字幕解析；只有 metadata pass 已经拿到真实 cue 才复用，否则在下载 pass 重新请求并写回 `meta.subtitles`。「首次字幕拉取失败」不再永久表现为无字幕。
+
+**5）验证**：`node --check` 全过；`m15-test.mjs` **67/67**（新增 sprite CDN allowlist、URL-hash 缓存名、JPEG magic、B 站 CDN validator 导出、活跃帧目录清理）、`panel-test.mjs` **33/33**、`client-test.mjs` **29/29**、`self-test.mjs` **36/36**；`git diff --check` 通过；真机 `/api/dsh-video-read/panel` 返回 `version=0.5.5` 且 `captionModels` 可用。
+
+---
 
 ### 2026-11-14 0.5.4 增量（视觉描述模型下拉 / 一致性修复）
 

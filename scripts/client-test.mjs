@@ -148,7 +148,7 @@ registrations.length = 0
 panelModule.apply(ctx)
 const panelEntry = registrations[0]
 const fixture = {
-  version: '0.5.4',
+  version: '0.5.5',
   config: { maxFrames: 16, quality: 3, bilibiliQuality: 64, autoDownloadFfmpeg: true, captionProvider: 'vision-provider', captionModel: 'vision-model' },
   captionModels: {
     selected: captionValue,

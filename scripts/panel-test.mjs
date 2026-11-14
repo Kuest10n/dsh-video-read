@@ -111,7 +111,7 @@ try {
     JSON.stringify(panel.body.captionModels))
   const staleSnapshot = await panelSnapshot({
     cfg: Object.assign({}, cfg, { captionProvider: 'old-provider', captionModel: 'old-model' }),
-    version: '0.5.4',
+    version: '0.5.5',
     ctx: { llm },
   })
   ok('panel keeps an out-of-catalog saved caption route selectable',
@@ -121,8 +121,8 @@ try {
   invalidateCaptionModelsMemo()
   const catalog = await captionModelCatalog({ llm })
   ok('caption model catalog memoizes and filters text-only models', catalog.count === 1 && catalog.items.every((item) => item.supportsImage))
-  const snapshot = await panelSnapshot({ cfg, version: '0.5.4', ctx: { llm } })
-  ok('snapshot reports its version and no-cache workspace', snapshot.version === '0.5.4' && snapshot.workspaceCache.totalBytes === 0, JSON.stringify(snapshot.workspaceCache))
+  const snapshot = await panelSnapshot({ cfg, version: '0.5.5', ctx: { llm } })
+  ok('snapshot reports its version and no-cache workspace', snapshot.version === '0.5.5' && snapshot.workspaceCache.totalBytes === 0, JSON.stringify(snapshot.workspaceCache))
 } finally {
   process.chdir(oldCwd)
   await rm(temporaryWorkspace, { recursive: true, force: true })
